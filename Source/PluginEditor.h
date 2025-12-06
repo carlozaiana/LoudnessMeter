@@ -19,11 +19,10 @@ private:
     
     LoudnessMeterAudioProcessor& audioProcessor;
     
-    LoudnessHistoryDisplay historyDisplay;
+    std::unique_ptr<LoudnessHistoryDisplay> historyDisplay;
     
-    // Resize constraints
     juce::ComponentBoundsConstrainer constrainer;
-    juce::ResizableCornerComponent resizer;
+    std::unique_ptr<juce::ResizableCornerComponent> resizer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessMeterAudioProcessorEditor)
 };

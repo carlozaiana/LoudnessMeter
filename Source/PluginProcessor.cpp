@@ -6,12 +6,10 @@ LoudnessMeterAudioProcessor::LoudnessMeterAudioProcessor()
                      .withInput("Input", juce::AudioChannelSet::stereo(), true)
                      .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
-    dataStore.prepare(kDataUpdateRateHz);
 }
 
 LoudnessMeterAudioProcessor::~LoudnessMeterAudioProcessor()
 {
-    stopTimer();
 }
 
 const juce::String LoudnessMeterAudioProcessor::getName() const
@@ -33,21 +31,23 @@ void LoudnessMeterAudioProcessor::changeProgramName(int, const juce::String&) {}
 void LoudnessMeterAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     loudnessMeter.prepare(sampleRate, samplesPerBlock, getTotalNumInputChannels());
-    dataStore.reset();
+    dataStore.prepare(10.0); // 10 Hz update rate
     
-    // Start timer for data collection (100ms = 10 Hz)
-    startTimerHz(static_cast<int>(kDataUpdateRateHz));
+    // Calculate samples per 100ms update
+    samplesPerUpdate = static_cast<int>(sampleRate * 0.1);
+    sampleCounter = 0;
+    
+    isPrepared = true;
 }
 
 void LoudnessMeterAudioProcessor::releaseResources()
 {
-    stopTimer();
+    isPrepared = false;
     loudnessMeter.reset();
 }
 
 bool LoudnessMeterAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-    // Support mono, stereo, and surround configurations
     const auto& mainInput = layouts.getMainInputChannelSet();
     const auto& mainOutput = layouts.getMainOutputChannelSet();
     
@@ -63,16 +63,6 @@ bool LoudnessMeterAudioProcessor::isBusesLayoutSupported(const BusesLayout& layo
         return true;
     if (mainInput == juce::AudioChannelSet::stereo())
         return true;
-    if (mainInput == juce::AudioChannelSet::createLCR())
-        return true;
-    if (mainInput == juce::AudioChannelSet::quadraphonic())
-        return true;
-    if (mainInput == juce::AudioChannelSet::create5point0())
-        return true;
-    if (mainInput == juce::AudioChannelSet::create5point1())
-        return true;
-    if (mainInput == juce::AudioChannelSet::create7point1())
-        return true;
     
     return false;
 }
@@ -82,19 +72,27 @@ void LoudnessMeterAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
 {
     juce::ScopedNoDenormals noDenormals;
     
+    if (!isPrepared)
+        return;
+    
     // Process through loudness meter (doesn't modify audio)
     loudnessMeter.processBlock(buffer);
     
-    // Pass audio through unchanged
-}
-
-void LoudnessMeterAudioProcessor::timerCallback()
-{
-    // Called at 10 Hz to store loudness data
-    float momentary = loudnessMeter.getMomentaryLoudness();
-    float shortTerm = loudnessMeter.getShortTermLoudness();
+    // Update cached values and data store periodically
+    sampleCounter += buffer.getNumSamples();
     
-    dataStore.addPoint(momentary, shortTerm);
+    if (sampleCounter >= samplesPerUpdate)
+    {
+        sampleCounter -= samplesPerUpdate;
+        
+        float m = loudnessMeter.getMomentaryLoudness();
+        float s = loudnessMeter.getShortTermLoudness();
+        
+        momentaryLoudness.store(m, std::memory_order_release);
+        shortTermLoudness.store(s, std::memory_order_release);
+        
+        dataStore.addPoint(m, s);
+    }
 }
 
 bool LoudnessMeterAudioProcessor::hasEditor() const
@@ -107,16 +105,12 @@ juce::AudioProcessorEditor* LoudnessMeterAudioProcessor::createEditor()
     return new LoudnessMeterAudioProcessorEditor(*this);
 }
 
-void LoudnessMeterAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
+void LoudnessMeterAudioProcessor::getStateInformation(juce::MemoryBlock&)
 {
-    // Store any plugin state here if needed
-    juce::ignoreUnused(destData);
 }
 
-void LoudnessMeterAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
+void LoudnessMeterAudioProcessor::setStateInformation(const void*, int)
 {
-    // Restore plugin state here if needed
-    juce::ignoreUnused(data, sizeInBytes);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

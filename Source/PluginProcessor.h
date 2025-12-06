@@ -4,8 +4,7 @@
 #include "DSP/EBU128LoudnessMeter.h"
 #include "Storage/LoudnessDataStore.h"
 
-class LoudnessMeterAudioProcessor : public juce::AudioProcessor,
-                                     private juce::Timer
+class LoudnessMeterAudioProcessor : public juce::AudioProcessor
 {
 public:
     LoudnessMeterAudioProcessor();
@@ -37,20 +36,24 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    // Public accessors
-    EBU128LoudnessMeter& getLoudnessMeter() { return loudnessMeter; }
+    // Public accessors - thread safe
+    float getMomentaryLoudness() const { return momentaryLoudness.load(std::memory_order_acquire); }
+    float getShortTermLoudness() const { return shortTermLoudness.load(std::memory_order_acquire); }
     LoudnessDataStore& getDataStore() { return dataStore; }
-    
-    float getMomentaryLoudness() const { return loudnessMeter.getMomentaryLoudness(); }
-    float getShortTermLoudness() const { return loudnessMeter.getShortTermLoudness(); }
 
 private:
-    void timerCallback() override;
-    
     EBU128LoudnessMeter loudnessMeter;
     LoudnessDataStore dataStore;
     
-    static constexpr double kDataUpdateRateHz = 10.0; // 10 Hz update rate for history
+    // Cached loudness values for thread-safe access from UI
+    std::atomic<float> momentaryLoudness{-100.0f};
+    std::atomic<float> shortTermLoudness{-100.0f};
+    
+    // Sample counter for 100ms updates
+    int sampleCounter{0};
+    int samplesPerUpdate{4800};
+    
+    bool isPrepared{false};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessMeterAudioProcessor)
 };

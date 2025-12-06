@@ -5,14 +5,16 @@ LoudnessMeterAudioProcessorEditor::LoudnessMeterAudioProcessorEditor(
     LoudnessMeterAudioProcessor& p)
     : AudioProcessorEditor(&p)
     , audioProcessor(p)
-    , historyDisplay(p.getDataStore())
-    , resizer(this, &constrainer)
 {
     // Set size constraints
     constrainer.setSizeLimits(400, 200, 2000, 1000);
     
-    addAndMakeVisible(historyDisplay);
-    addAndMakeVisible(resizer);
+    // Create components after setting up the editor
+    historyDisplay = std::make_unique<LoudnessHistoryDisplay>(p.getDataStore());
+    addAndMakeVisible(*historyDisplay);
+    
+    resizer = std::make_unique<juce::ResizableCornerComponent>(this, &constrainer);
+    addAndMakeVisible(*resizer);
     
     // Set initial size
     setSize(800, 400);
@@ -36,17 +38,20 @@ void LoudnessMeterAudioProcessorEditor::resized()
 {
     auto bounds = getLocalBounds();
     
-    historyDisplay.setBounds(bounds);
+    if (historyDisplay)
+        historyDisplay->setBounds(bounds);
     
-    // Position resizer in bottom-right corner
-    resizer.setBounds(bounds.getWidth() - 16, bounds.getHeight() - 16, 16, 16);
+    if (resizer)
+        resizer->setBounds(bounds.getWidth() - 16, bounds.getHeight() - 16, 16, 16);
 }
 
 void LoudnessMeterAudioProcessorEditor::timerCallback()
 {
-    // Update display with current loudness values
-    historyDisplay.setCurrentLoudness(
-        audioProcessor.getMomentaryLoudness(),
-        audioProcessor.getShortTermLoudness()
-    );
+    if (historyDisplay)
+    {
+        historyDisplay->setCurrentLoudness(
+            audioProcessor.getMomentaryLoudness(),
+            audioProcessor.getShortTermLoudness()
+        );
+    }
 }
