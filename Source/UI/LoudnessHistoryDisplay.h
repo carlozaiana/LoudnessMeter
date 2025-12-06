@@ -2,7 +2,6 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Storage/LoudnessDataStore.h"
-#include <atomic>
 
 class LoudnessHistoryDisplay : public juce::Component,
                                 private juce::Timer
@@ -28,40 +27,59 @@ private:
     void drawGrid(juce::Graphics& g);
     void drawCurves(juce::Graphics& g);
     void drawCurrentValues(juce::Graphics& g);
+    void drawZoomInfo(juce::Graphics& g);
+    
+    void rebuildPaths();
     
     float timeToX(double time) const;
     float loudnessToY(float lufs) const;
+    int snapToPixel(float value) const;
     
     LoudnessDataStore& dataStore;
     
+    // View state
     double viewStartTime{-10.0};
     double viewTimeRange{10.0};
     float viewMinLufs{-60.0f};
     float viewMaxLufs{0.0f};
     
-    static constexpr double kMinTimeRange = 1.0;
+    // Zoom limits
+    static constexpr double kMinTimeRange = 0.5;
     static constexpr double kMaxTimeRange = 18000.0;
     static constexpr float kMinLufsRange = 6.0f;
     static constexpr float kMaxLufsRange = 80.0f;
     
+    // Current loudness
     float currentMomentary{-100.0f};
     float currentShortTerm{-100.0f};
     
+    // Mouse interaction
     juce::Point<float> lastMousePos;
     bool isDragging{false};
     
+    // Colors
     const juce::Colour backgroundColour = juce::Colour(16, 30, 50);
     const juce::Colour momentaryColour = juce::Colour(45, 132, 107);
     const juce::Colour shortTermColour = juce::Colour(146, 173, 196);
     const juce::Colour gridColour = juce::Colour(255, 255, 255).withAlpha(0.12f);
     const juce::Colour textColour = juce::Colour(200, 200, 200);
     
+    // Cached render data
     LoudnessDataStore::RenderData cachedRenderData;
-    double cachedStartTime{0.0};
-    double cachedEndTime{0.0};
-    int cachedWidth{0};
     
-    static constexpr double kScrollSmoothing = 0.15;
+    // Cached paths for efficient rendering
+    juce::Path momentaryPath;
+    juce::Path shortTermPath;
+    juce::Path momentaryFillPath;
+    juce::Path shortTermFillPath;
+    
+    // State tracking for cache invalidation
+    double lastViewStartTime{0.0};
+    double lastViewTimeRange{0.0};
+    int lastWidth{0};
+    int lastHeight{0};
+    double lastDataTime{0.0};
+    bool pathsNeedRebuild{true};
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessHistoryDisplay)
 };
