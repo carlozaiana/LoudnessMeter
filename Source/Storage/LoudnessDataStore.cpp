@@ -6,7 +6,7 @@ LoudnessDataStore::LoudnessDataStore()
 {
     // Initialize LOD levels with reduction factors
     size_t factor = 1;
-    for (int i = 0; i < kLodLevels; ++i)
+    for (size_t i = 0; i < kLodLevels; ++i)
     {
         lodLevels[i].reductionFactor = factor;
         lodLevels[i].points.reserve(kMemoryThreshold / factor);
@@ -83,7 +83,7 @@ void LoudnessDataStore::addPoint(float momentary, float shortTerm)
     }
     
     // Update LOD levels
-    for (int level = 1; level < kLodLevels; ++level)
+    for (size_t level = 1; level < kLodLevels; ++level)
     {
         auto& lod = lodLevels[level];
         
@@ -95,7 +95,7 @@ void LoudnessDataStore::addPoint(float momentary, float shortTerm)
         lod.currentCount++;
         
         // Check if we've accumulated enough for this LOD level
-        if (lod.currentCount >= static_cast<int>(lod.reductionFactor))
+        if (static_cast<size_t>(lod.currentCount) >= lod.reductionFactor)
         {
             // Store the averaged point
             LoudnessPoint avgPoint;
@@ -148,13 +148,13 @@ int LoudnessDataStore::selectLodLevel(double timeRange, int maxPixels) const
 {
     // Calculate required resolution: points per pixel
     double pointsNeeded = timeRange * updateRate;
-    double pointsPerPixel = pointsNeeded / maxPixels;
+    double pointsPerPixel = pointsNeeded / static_cast<double>(maxPixels);
     
     // Select LOD level that gives roughly 2-4 points per pixel
     // (ensures smooth rendering without aliasing)
-    for (int level = kLodLevels - 1; level >= 0; --level)
+    for (int level = static_cast<int>(kLodLevels) - 1; level >= 0; --level)
     {
-        double effectivePointsPerPixel = pointsPerPixel / static_cast<double>(lodLevels[level].reductionFactor);
+        double effectivePointsPerPixel = pointsPerPixel / static_cast<double>(lodLevels[static_cast<size_t>(level)].reductionFactor);
         if (effectivePointsPerPixel >= 2.0)
             return level;
     }
@@ -175,11 +175,12 @@ LoudnessDataStore::RenderData LoudnessDataStore::getDataForTimeRange(
     double timeRange = endTime - startTime;
     result.lodLevel = selectLodLevel(timeRange, maxPixels);
     
-    const auto& lod = lodLevels[result.lodLevel];
+    const auto& lod = lodLevels[static_cast<size_t>(result.lodLevel)];
     
     // Calculate index range
-    size_t startIdx = static_cast<size_t>(std::max(0.0, startTime * updateRate / static_cast<double>(lod.reductionFactor)));
-    size_t endIdx = static_cast<size_t>(std::ceil(endTime * updateRate / static_cast<double>(lod.reductionFactor)));
+    double reductionFactor = static_cast<double>(lod.reductionFactor);
+    size_t startIdx = static_cast<size_t>(std::max(0.0, startTime * updateRate / reductionFactor));
+    size_t endIdx = static_cast<size_t>(std::ceil(endTime * updateRate / reductionFactor));
     
     if (startIdx >= lod.points.size())
         return result;

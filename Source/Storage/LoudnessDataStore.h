@@ -5,6 +5,7 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <array>
 
 /**
  * Hierarchical Level-of-Detail storage for loudness data
@@ -65,8 +66,8 @@ public:
 
 private:
     static constexpr size_t kMemoryThreshold = 50000; // Points before spilling to disk
-    static constexpr int kLodLevels = 5;
-    static constexpr int kLodFactor = 4; // Reduction factor between levels
+    static constexpr size_t kLodLevels = 5;
+    static constexpr size_t kLodFactor = 4; // Reduction factor between levels
     
     struct LodLevel
     {
