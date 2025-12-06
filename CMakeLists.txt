@@ -9,6 +9,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Build architectures")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version")
 
+# Fix for Xcode 15 linker issue with older deployment targets
+add_link_options("-Wl,-ld_classic")
+
 # Fetch JUCE
 include(FetchContent)
 FetchContent_Declare(
@@ -56,6 +59,7 @@ target_compile_definitions(LoudnessMeter
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0
+        JUCE_SILENCE_XCODE_15_LINKER_WARNING=1
 )
 
 target_link_libraries(LoudnessMeter
@@ -65,6 +69,5 @@ target_link_libraries(LoudnessMeter
         juce::juce_opengl
     PUBLIC
         juce::juce_recommended_config_flags
-        juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
