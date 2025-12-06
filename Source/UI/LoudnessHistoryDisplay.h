@@ -1,6 +1,7 @@
 #pragma once
 
-#include <JuceHeader.h>
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_opengl/juce_opengl.h>
 #include "../Storage/LoudnessDataStore.h"
 #include <atomic>
 
@@ -18,7 +19,7 @@ class LoudnessHistoryDisplay : public juce::Component,
                                 private juce::Timer
 {
 public:
-    LoudnessHistoryDisplay(LoudnessDataStore& dataStore);
+    explicit LoudnessHistoryDisplay(LoudnessDataStore& dataStore);
     ~LoudnessHistoryDisplay() override;
 
     // Component overrides
@@ -79,7 +80,7 @@ private:
     const juce::Colour backgroundColour{16, 30, 50};
     const juce::Colour momentaryColour{45, 132, 107};
     const juce::Colour shortTermColour{146, 173, 196};
-    const juce::Colour gridColour{255, 255, 255, 30};
+    const juce::Colour gridColour{255, 255, 255, static_cast<juce::uint8>(30)};
     const juce::Colour textColour{200, 200, 200};
     
     // Cached render data

@@ -11,13 +11,6 @@ LoudnessHistoryDisplay::LoudnessHistoryDisplay(LoudnessDataStore& store)
     openGLContext.setContinuousRepainting(false);
     openGLContext.setComponentPaintingEnabled(true);
     
-    // Attach OpenGL context - will fall back to software if unavailable
-    if (juce::OpenGLHelpers::isContextActive())
-    {
-        openGLContext.attachTo(*this);
-        useOpenGL = true;
-    }
-    
     // Start update timer at 60 FPS for smooth scrolling
     startTimerHz(60);
 }
@@ -32,7 +25,8 @@ void LoudnessHistoryDisplay::timerCallback()
 {
     // Auto-scroll: keep view at current time
     double currentTime = dataStore.getCurrentTime();
-    double targetStart = currentTime - viewTimeRange.load(std::memory_order_relaxed) * 0.9;
+    double range = viewTimeRange.load(std::memory_order_relaxed);
+    double targetStart = currentTime - range * 0.9;
     
     // Smooth scrolling animation
     double currentStart = viewStartTime.load(std::memory_order_relaxed);
@@ -82,11 +76,10 @@ void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
         float currentMin = viewMinLufs.load(std::memory_order_relaxed);
         float currentMax = viewMaxLufs.load(std::memory_order_relaxed);
         float range = currentMax - currentMin;
-        float center = (currentMax + currentMin) * 0.5f;
         
         // Zoom centered on mouse Y position
         float mouseY = event.position.y;
-        float mouseRatio = mouseY / getHeight();
+        float mouseRatio = mouseY / static_cast<float>(getHeight());
         float mouseLufs = currentMax - mouseRatio * range;
         
         float newRange = range;
@@ -124,7 +117,7 @@ void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
         
         // Zoom centered on mouse X position
         float mouseX = event.position.x;
-        double mouseRatio = mouseX / getWidth();
+        double mouseRatio = static_cast<double>(mouseX) / static_cast<double>(getWidth());
         double mouseTime = currentStart + mouseRatio * currentRange;
         
         double newRange = currentRange;
@@ -163,14 +156,14 @@ void LoudnessHistoryDisplay::mouseDrag(const juce::MouseEvent& event)
     
     // Pan the view
     double timeRange = viewTimeRange.load(std::memory_order_relaxed);
-    double timeDelta = -dx * timeRange / getWidth();
+    double timeDelta = static_cast<double>(-dx) * timeRange / static_cast<double>(getWidth());
     
     double currentStart = viewStartTime.load(std::memory_order_relaxed);
     viewStartTime.store(currentStart + timeDelta, std::memory_order_relaxed);
     
     float lufsRange = viewMaxLufs.load(std::memory_order_relaxed) - 
                       viewMinLufs.load(std::memory_order_relaxed);
-    float lufsDelta = dy * lufsRange / getHeight();
+    float lufsDelta = dy * lufsRange / static_cast<float>(getHeight());
     
     viewMinLufs.store(viewMinLufs.load(std::memory_order_relaxed) + lufsDelta, 
                       std::memory_order_relaxed);
@@ -279,9 +272,6 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
     
     auto bounds = getLocalBounds().toFloat();
     
-    // Anti-aliasing for smooth curves
-    g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
-    
     double startTime = viewStartTime.load(std::memory_order_relaxed);
     double timeRange = viewTimeRange.load(std::memory_order_relaxed);
     
@@ -289,10 +279,9 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
     {
         // Draw envelope bands for zoomed out view
         auto& minMax = cachedRenderData.minMaxBands;
-        auto& points = cachedRenderData.points;
         
         // Calculate time step
-        double timeStep = timeRange / minMax.size();
+        double timeStep = timeRange / static_cast<double>(minMax.size());
         
         // Momentary envelope
         juce::Path momentaryEnvelope;
@@ -301,7 +290,7 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
         bool firstPoint = true;
         for (size_t i = 0; i < minMax.size(); ++i)
         {
-            double t = startTime + i * timeStep;
+            double t = startTime + static_cast<double>(i) * timeStep;
             float x = timeToX(t);
             float yMax = loudnessToY(minMax[i].maxMomentary);
             
@@ -319,9 +308,9 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
         // Draw back along min values
         for (int i = static_cast<int>(minMax.size()) - 1; i >= 0; --i)
         {
-            double t = startTime + i * timeStep;
+            double t = startTime + static_cast<double>(i) * timeStep;
             float x = timeToX(t);
-            float yMin = loudnessToY(minMax[i].minMomentary);
+            float yMin = loudnessToY(minMax[static_cast<size_t>(i)].minMomentary);
             momentaryEnvelope.lineTo(x, yMin);
         }
         momentaryEnvelope.closeSubPath();
@@ -334,7 +323,7 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
         firstPoint = true;
         for (size_t i = 0; i < minMax.size(); ++i)
         {
-            double t = startTime + i * timeStep;
+            double t = startTime + static_cast<double>(i) * timeStep;
             float x = timeToX(t);
             float yMax = loudnessToY(minMax[i].maxShortTerm);
             
@@ -351,9 +340,9 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
         
         for (int i = static_cast<int>(minMax.size()) - 1; i >= 0; --i)
         {
-            double t = startTime + i * timeStep;
+            double t = startTime + static_cast<double>(i) * timeStep;
             float x = timeToX(t);
-            float yMin = loudnessToY(minMax[i].minShortTerm);
+            float yMin = loudnessToY(minMax[static_cast<size_t>(i)].minShortTerm);
             shortTermEnvelope.lineTo(x, yMin);
         }
         shortTermEnvelope.closeSubPath();
@@ -426,7 +415,7 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
     g.setFont(18.0f);
     
     juce::String momentaryStr = momentary > -100.0f ? 
-        juce::String(momentary, 1) + " LUFS" : "-∞ LUFS";
+        juce::String(momentary, 1) + " LUFS" : "-inf LUFS";
     g.drawText(momentaryStr, momentaryBox.reduced(5, 0), 
                juce::Justification::left);
     
@@ -441,7 +430,7 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
     g.setFont(18.0f);
     
     juce::String shortTermStr = shortTerm > -100.0f ? 
-        juce::String(shortTerm, 1) + " LUFS" : "-∞ LUFS";
+        juce::String(shortTerm, 1) + " LUFS" : "-inf LUFS";
     g.drawText(shortTermStr, shortTermBox.reduced(5, 0), 
                juce::Justification::left);
     
@@ -466,7 +455,7 @@ float LoudnessHistoryDisplay::timeToX(double time) const
 {
     double startTime = viewStartTime.load(std::memory_order_relaxed);
     double timeRange = viewTimeRange.load(std::memory_order_relaxed);
-    return static_cast<float>((time - startTime) / timeRange * getWidth());
+    return static_cast<float>((time - startTime) / timeRange * static_cast<double>(getWidth()));
 }
 
 float LoudnessHistoryDisplay::loudnessToY(float lufs) const
@@ -474,14 +463,14 @@ float LoudnessHistoryDisplay::loudnessToY(float lufs) const
     float minLufs = viewMinLufs.load(std::memory_order_relaxed);
     float maxLufs = viewMaxLufs.load(std::memory_order_relaxed);
     float range = maxLufs - minLufs;
-    return (maxLufs - lufs) / range * getHeight();
+    return (maxLufs - lufs) / range * static_cast<float>(getHeight());
 }
 
 double LoudnessHistoryDisplay::xToTime(float x) const
 {
     double startTime = viewStartTime.load(std::memory_order_relaxed);
     double timeRange = viewTimeRange.load(std::memory_order_relaxed);
-    return startTime + (x / getWidth()) * timeRange;
+    return startTime + (static_cast<double>(x) / static_cast<double>(getWidth())) * timeRange;
 }
 
 float LoudnessHistoryDisplay::yToLoudness(float y) const
@@ -489,7 +478,7 @@ float LoudnessHistoryDisplay::yToLoudness(float y) const
     float minLufs = viewMinLufs.load(std::memory_order_relaxed);
     float maxLufs = viewMaxLufs.load(std::memory_order_relaxed);
     float range = maxLufs - minLufs;
-    return maxLufs - (y / getHeight()) * range;
+    return maxLufs - (y / static_cast<float>(getHeight())) * range;
 }
 
 void LoudnessHistoryDisplay::updateCachedData()
