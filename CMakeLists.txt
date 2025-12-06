@@ -22,7 +22,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
-# Plugin target
+# Disable all plugin formats we don't need
+set(JUCE_PLUGINHOST_VST3 OFF CACHE BOOL "" FORCE)
+set(JUCE_PLUGINHOST_VST OFF CACHE BOOL "" FORCE)
+set(JUCE_PLUGINHOST_AU OFF CACHE BOOL "" FORCE)
+set(JUCE_PLUGINHOST_LADSPA OFF CACHE BOOL "" FORCE)
+set(JUCE_PLUGINHOST_LV2 OFF CACHE BOOL "" FORCE)
+set(JUCE_PLUGINHOST_ARA OFF CACHE BOOL "" FORCE)
+
+# Plugin target - VST3 ONLY
 juce_add_plugin(LoudnessMeter
     COMPANY_NAME "AudioDev"
     IS_SYNTH FALSE
@@ -34,6 +42,7 @@ juce_add_plugin(LoudnessMeter
     PLUGIN_MANUFACTURER_CODE AdEv
     PLUGIN_CODE Ldmt
     FORMATS VST3
+    VST3_AUTO_MANIFEST FALSE
     PRODUCT_NAME "Loudness Meter"
 )
 
@@ -60,6 +69,21 @@ target_compile_definitions(LoudnessMeter
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0
         JUCE_SILENCE_XCODE_15_LINKER_WARNING=1
+        # Disable unused plugin formats
+        JUCE_PLUGINHOST_VST3=0
+        JUCE_PLUGINHOST_VST=0
+        JUCE_PLUGINHOST_AU=0
+        JUCE_PLUGINHOST_LADSPA=0
+        JUCE_PLUGINHOST_LV2=0
+        JUCE_PLUGINHOST_ARA=0
+        JucePlugin_Build_VST=0
+        JucePlugin_Build_VST3=1
+        JucePlugin_Build_AU=0
+        JucePlugin_Build_AUv3=0
+        JucePlugin_Build_AAX=0
+        JucePlugin_Build_Standalone=0
+        JucePlugin_Build_Unity=0
+        JucePlugin_Build_LV2=0
 )
 
 target_link_libraries(LoudnessMeter
