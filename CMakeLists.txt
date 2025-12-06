@@ -34,6 +34,8 @@ juce_add_plugin(LoudnessMeter
     PRODUCT_NAME "Loudness Meter"
 )
 
+juce_generate_juce_header(LoudnessMeter)
+
 target_sources(LoudnessMeter
     PRIVATE
         Source/PluginProcessor.cpp
