@@ -77,11 +77,11 @@ private:
     bool isDragging{false};
     
     // Colors
-    const juce::Colour backgroundColour{16, 30, 50};
-    const juce::Colour momentaryColour{45, 132, 107};
-    const juce::Colour shortTermColour{146, 173, 196};
-    const juce::Colour gridColour{255, 255, 255, static_cast<juce::uint8>(30)};
-    const juce::Colour textColour{200, 200, 200};
+    const juce::Colour backgroundColour = juce::Colour(16, 30, 50);
+    const juce::Colour momentaryColour = juce::Colour(45, 132, 107);
+    const juce::Colour shortTermColour = juce::Colour(146, 173, 196);
+    const juce::Colour gridColour = juce::Colour(255, 255, 255).withAlpha(0.12f);
+    const juce::Colour textColour = juce::Colour(200, 200, 200);
     
     // Cached render data
     LoudnessDataStore::RenderData cachedRenderData;
