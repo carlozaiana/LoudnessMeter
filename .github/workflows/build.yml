@@ -23,8 +23,7 @@ jobs:
         xcode-version: '15.2'
 
     - name: Install Dependencies
-      run: |
-        brew install cmake ninja
+      run: brew install cmake ninja
 
     - name: Configure CMake
       run: |
@@ -35,18 +34,22 @@ jobs:
           -DCMAKE_OSX_DEPLOYMENT_TARGET="10.13"
 
     - name: Build
-      run: cmake --build build --config Release
+      run: cmake --build build --config Release --parallel $(sysctl -n hw.ncpu)
 
     - name: Verify Universal Binary
       run: |
         echo "Checking architectures..."
-        find build -name "*.vst3" -type d | head -1 | xargs -I {} find {} -name "LoudnessMeter" -type f | head -1 | xargs file || true
-        find build -name "*.vst3" -type d | head -1 | xargs -I {} find {} -name "LoudnessMeter" -type f | head -1 | xargs lipo -info || true
+        VST3_BINARY=$(find build -path "*/Contents/MacOS/*" -type f | head -1)
+        if [ -n "$VST3_BINARY" ]; then
+          file "$VST3_BINARY"
+          lipo -info "$VST3_BINARY"
+        fi
 
     - name: Package VST3
       run: |
         mkdir -p artifacts
         find build -name "*.vst3" -type d -exec cp -R {} artifacts/ \;
+        ls -la artifacts/
 
     - name: Upload VST3 Artifact
       uses: actions/upload-artifact@v4
