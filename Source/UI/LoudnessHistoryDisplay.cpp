@@ -6,10 +6,8 @@ LoudnessHistoryDisplay::LoudnessHistoryDisplay(LoudnessDataStore& store)
 {
     setOpaque(true);
     
-    // Try to use OpenGL for better performance
-    openGLContext.setRenderer(this);
-    openGLContext.setContinuousRepainting(false);
-    openGLContext.setComponentPaintingEnabled(true);
+    // Enable high-quality rendering
+    setBufferedToImage(true);
     
     // Start update timer at 60 FPS for smooth scrolling
     startTimerHz(60);
@@ -18,7 +16,6 @@ LoudnessHistoryDisplay::LoudnessHistoryDisplay(LoudnessDataStore& store)
 LoudnessHistoryDisplay::~LoudnessHistoryDisplay()
 {
     stopTimer();
-    openGLContext.detach();
 }
 
 void LoudnessHistoryDisplay::timerCallback()
@@ -174,19 +171,9 @@ void LoudnessHistoryDisplay::mouseDrag(const juce::MouseEvent& event)
     repaint();
 }
 
-void LoudnessHistoryDisplay::newOpenGLContextCreated()
+void LoudnessHistoryDisplay::mouseUp(const juce::MouseEvent&)
 {
-    // OpenGL initialization if needed
-}
-
-void LoudnessHistoryDisplay::renderOpenGL()
-{
-    // OpenGL rendering - currently using software rendering via paint()
-}
-
-void LoudnessHistoryDisplay::openGLContextClosing()
-{
-    // Cleanup
+    isDragging = false;
 }
 
 void LoudnessHistoryDisplay::drawBackground(juce::Graphics& g)
@@ -500,9 +487,4 @@ void LoudnessHistoryDisplay::updateCachedData()
         cachedWidth = width;
         needsDataUpdate = false;
     }
-}
-
-void LoudnessHistoryDisplay::updatePaths()
-{
-    // Reserved for future optimizations
 }

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include <juce_opengl/juce_opengl.h>
 #include "../Storage/LoudnessDataStore.h"
 #include <atomic>
 
@@ -9,13 +8,12 @@
  * High-performance loudness history display with smooth scrolling
  * 
  * Features:
- * - OpenGL-accelerated rendering for smooth performance
+ * - Double-buffered software rendering for smooth performance
  * - Anti-aliased curve rendering
  * - Mouse wheel zoom for X/Y axes
  * - Automatic LOD selection for consistent performance
  */
 class LoudnessHistoryDisplay : public juce::Component,
-                                public juce::OpenGLRenderer,
                                 private juce::Timer
 {
 public:
@@ -29,11 +27,7 @@ public:
                         const juce::MouseWheelDetails& wheel) override;
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
-
-    // OpenGL overrides
-    void newOpenGLContextCreated() override;
-    void renderOpenGL() override;
-    void openGLContextClosing() override;
+    void mouseUp(const juce::MouseEvent& event) override;
 
     // Update current loudness values for real-time display
     void setCurrentLoudness(float momentary, float shortTerm);
@@ -90,22 +84,11 @@ private:
     int cachedWidth{0};
     bool needsDataUpdate{true};
     
-    // OpenGL context
-    juce::OpenGLContext openGLContext;
-    bool useOpenGL{false};
-    
     // Smooth scrolling
     double scrollAnimationTarget{0.0};
     double scrollAnimationCurrent{0.0};
     static constexpr double kScrollSmoothing = 0.15;
     
-    // Path cache for anti-aliased rendering
-    juce::Path momentaryPath;
-    juce::Path shortTermPath;
-    juce::Path momentaryEnvelopePath;
-    juce::Path shortTermEnvelopePath;
-    
-    void updatePaths();
     void updateCachedData();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessHistoryDisplay)
