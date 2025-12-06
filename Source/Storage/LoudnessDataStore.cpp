@@ -57,7 +57,7 @@ void LoudnessDataStore::addPoint(float momentary, float shortTerm)
     std::lock_guard<std::mutex> lock(dataMutex);
     
     size_t count = totalPoints.load(std::memory_order_relaxed);
-    double timestamp = count / updateRate;
+    double timestamp = static_cast<double>(count) / updateRate;
     
     LoudnessPoint point{momentary, shortTerm, timestamp};
     
@@ -135,7 +135,7 @@ void LoudnessDataStore::flushToDisk()
         // Keep last chunk in memory for fast access
         size_t keepInMemory = std::min(lodLevels[0].points.size(), kMemoryThreshold / 4);
         std::vector<LoudnessPoint> recentPoints(
-            lodLevels[0].points.end() - keepInMemory,
+            lodLevels[0].points.end() - static_cast<std::ptrdiff_t>(keepInMemory),
             lodLevels[0].points.end()
         );
         lodLevels[0].points = std::move(recentPoints);
@@ -154,7 +154,7 @@ int LoudnessDataStore::selectLodLevel(double timeRange, int maxPixels) const
     // (ensures smooth rendering without aliasing)
     for (int level = kLodLevels - 1; level >= 0; --level)
     {
-        double effectivePointsPerPixel = pointsPerPixel / lodLevels[level].reductionFactor;
+        double effectivePointsPerPixel = pointsPerPixel / static_cast<double>(lodLevels[level].reductionFactor);
         if (effectivePointsPerPixel >= 2.0)
             return level;
     }
@@ -178,8 +178,8 @@ LoudnessDataStore::RenderData LoudnessDataStore::getDataForTimeRange(
     const auto& lod = lodLevels[result.lodLevel];
     
     // Calculate index range
-    size_t startIdx = static_cast<size_t>(std::max(0.0, startTime * updateRate / lod.reductionFactor));
-    size_t endIdx = static_cast<size_t>(std::ceil(endTime * updateRate / lod.reductionFactor));
+    size_t startIdx = static_cast<size_t>(std::max(0.0, startTime * updateRate / static_cast<double>(lod.reductionFactor)));
+    size_t endIdx = static_cast<size_t>(std::ceil(endTime * updateRate / static_cast<double>(lod.reductionFactor)));
     
     if (startIdx >= lod.points.size())
         return result;
@@ -187,7 +187,7 @@ LoudnessDataStore::RenderData LoudnessDataStore::getDataForTimeRange(
     endIdx = std::min(endIdx, lod.points.size());
     
     // Determine if we should use min/max bands (when zoomed out significantly)
-    double effectivePointsPerPixel = (endIdx - startIdx) / static_cast<double>(maxPixels);
+    double effectivePointsPerPixel = static_cast<double>(endIdx - startIdx) / static_cast<double>(maxPixels);
     result.useMinMax = (effectivePointsPerPixel > 4.0) && (result.lodLevel > 0);
     
     if (result.useMinMax && !lod.minMaxPairs.empty())
@@ -203,8 +203,8 @@ LoudnessDataStore::RenderData LoudnessDataStore::getDataForTimeRange(
         }
         
         // Also add representative points for line rendering
-        size_t step = std::max(size_t(1), (mmEndIdx - mmStartIdx) / maxPixels);
-        result.points.reserve(maxPixels);
+        size_t step = std::max(size_t(1), (mmEndIdx - mmStartIdx) / static_cast<size_t>(maxPixels));
+        result.points.reserve(static_cast<size_t>(maxPixels));
         for (size_t i = mmStartIdx; i < mmEndIdx; i += step)
         {
             if (i < lod.points.size())
