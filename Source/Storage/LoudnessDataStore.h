@@ -22,7 +22,8 @@ public:
         float maxMomentary{-100.0f};
         float minShortTerm{100.0f};
         float maxShortTerm{-100.0f};
-        double timestamp{0.0};
+        double startTime{0.0};
+        double endTime{0.0};
     };
 
     LoudnessDataStore();
@@ -36,51 +37,58 @@ public:
     
     struct RenderData
     {
-        std::vector<LoudnessPoint> points;
-        std::vector<MinMaxPoint> minMaxPoints;
-        bool useMinMax{false};
+        std::vector<MinMaxPoint> points;
         int lodLevel{0};
-        double zoomFactor{1.0};
+        double bucketDuration{0.1};
     };
     
-    // Called from UI thread - uses mutex for LOD access, lock-free for recent data
+    // Called from UI thread
     RenderData getDataForTimeRange(double startTime, double endTime, int maxPixels);
     
     double getCurrentTime() const;
 
 private:
-    // Lock-free ring buffer for recent data (last ~60 seconds at 10Hz = 600 points)
-    static constexpr size_t kRingBufferSize = 1024;
+    // Lock-free ring buffer for recent data
+    static constexpr size_t kRingBufferSize = 2048;
     std::array<LoudnessPoint, kRingBufferSize> ringBuffer;
     std::atomic<size_t> writeIndex{0};
-    std::atomic<size_t> pointCount{0};
+    std::atomic<size_t> totalPointCount{0};
     
-    // LOD levels for historical data (protected by mutex)
+    // LOD levels with FIXED time-aligned boundaries
+    // LOD 0: 0.1s buckets (native rate)
+    // LOD 1: 0.4s buckets
+    // LOD 2: 1.6s buckets
+    // LOD 3: 6.4s buckets
+    // LOD 4: 25.6s buckets
     static constexpr size_t kLodLevels = 5;
-    static constexpr size_t kLodFactor = 4;
+    static constexpr double kBaseBucketDuration = 0.1; // 100ms base
+    static constexpr double kLodFactor = 4.0;
     
     struct LodLevel
     {
-        std::vector<MinMaxPoint> points;
-        size_t reductionFactor{1};
-        MinMaxPoint accumulator{100.0f, -100.0f, 100.0f, -100.0f, 0.0};
-        size_t accumulatorCount{0};
+        std::vector<MinMaxPoint> buckets;
+        double bucketDuration{0.1};
+        
+        // Current bucket being accumulated
+        MinMaxPoint currentBucket{100.0f, -100.0f, 100.0f, -100.0f, 0.0, 0.0};
+        bool hasCurrentBucket{false};
     };
     
     std::array<LodLevel, kLodLevels> lodLevels;
     std::mutex lodMutex;
     
-    // Timing
     double updateRate{10.0};
     std::atomic<double> currentTimestamp{0.0};
     
-    // Process ring buffer data into LOD levels
-    size_t lastProcessedIndex{0};
+    // Track what's been processed from ring buffer
+    size_t lastProcessedCount{0};
+    
     void processRingBufferToLOD();
+    void addPointToLOD(const LoudnessPoint& point);
     
-    int selectLodLevel(double timeRange, int maxPixels) const;
-    
-    // Helper to get points from ring buffer
-    void getRecentPoints(double startTime, double endTime, int maxPixels, RenderData& result);
-    void getLODPoints(double startTime, double endTime, int maxPixels, RenderData& result);
+    // LOD selection with hysteresis
+    int selectLodLevel(double timeRange, int maxPixels, int currentLod) const;
+    int lastSelectedLod{0};
+    double lastTimeRange{10.0};
+    static constexpr double kLodHysteresis = 1.5; // 50% hysteresis band
 };

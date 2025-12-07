@@ -4,15 +4,14 @@
 
 LoudnessDataStore::LoudnessDataStore()
 {
-    size_t factor = 1;
+    double bucketDuration = kBaseBucketDuration;
     for (size_t i = 0; i < kLodLevels; ++i)
     {
-        lodLevels[i].reductionFactor = factor;
-        lodLevels[i].points.reserve(10000);
-        factor *= kLodFactor;
+        lodLevels[i].bucketDuration = bucketDuration;
+        lodLevels[i].buckets.reserve(50000 / static_cast<size_t>(std::pow(kLodFactor, i)));
+        bucketDuration *= kLodFactor;
     }
     
-    // Initialize ring buffer
     for (auto& point : ringBuffer)
     {
         point = LoudnessPoint{-100.0f, -100.0f, 0.0};
@@ -27,238 +26,217 @@ void LoudnessDataStore::prepare(double updateRateHz)
 void LoudnessDataStore::reset()
 {
     writeIndex.store(0, std::memory_order_relaxed);
-    pointCount.store(0, std::memory_order_relaxed);
+    totalPointCount.store(0, std::memory_order_relaxed);
     currentTimestamp.store(0.0, std::memory_order_relaxed);
-    lastProcessedIndex = 0;
+    lastProcessedCount = 0;
+    lastSelectedLod = 0;
+    lastTimeRange = 10.0;
     
     std::lock_guard<std::mutex> lock(lodMutex);
     for (auto& level : lodLevels)
     {
-        level.points.clear();
-        level.accumulator = MinMaxPoint{100.0f, -100.0f, 100.0f, -100.0f, 0.0};
-        level.accumulatorCount = 0;
+        level.buckets.clear();
+        level.currentBucket = MinMaxPoint{100.0f, -100.0f, 100.0f, -100.0f, 0.0, 0.0};
+        level.hasCurrentBucket = false;
     }
 }
 
 void LoudnessDataStore::addPoint(float momentary, float shortTerm)
 {
-    // Lock-free write to ring buffer
-    size_t count = pointCount.load(std::memory_order_relaxed);
+    size_t count = totalPointCount.load(std::memory_order_relaxed);
     double timestamp = static_cast<double>(count) / updateRate;
     
     size_t idx = writeIndex.load(std::memory_order_relaxed);
-    
     ringBuffer[idx] = LoudnessPoint{momentary, shortTerm, timestamp};
     
     size_t nextIdx = (idx + 1) % kRingBufferSize;
     writeIndex.store(nextIdx, std::memory_order_release);
-    pointCount.fetch_add(1, std::memory_order_relaxed);
+    totalPointCount.fetch_add(1, std::memory_order_relaxed);
     currentTimestamp.store(timestamp, std::memory_order_release);
+}
+
+void LoudnessDataStore::addPointToLOD(const LoudnessPoint& point)
+{
+    for (size_t level = 0; level < kLodLevels; ++level)
+    {
+        auto& lod = lodLevels[level];
+        double bucketDuration = lod.bucketDuration;
+        
+        // Calculate which bucket this point belongs to (fixed time-aligned boundaries)
+        double bucketIndex = std::floor(point.timestamp / bucketDuration);
+        double bucketStartTime = bucketIndex * bucketDuration;
+        double bucketEndTime = bucketStartTime + bucketDuration;
+        
+        // Check if we need to start a new bucket
+        if (!lod.hasCurrentBucket || point.timestamp >= lod.currentBucket.endTime)
+        {
+            // Finalize previous bucket if it exists
+            if (lod.hasCurrentBucket)
+            {
+                lod.buckets.push_back(lod.currentBucket);
+            }
+            
+            // Start new bucket
+            lod.currentBucket = MinMaxPoint{
+                point.momentary, point.momentary,
+                point.shortTerm, point.shortTerm,
+                bucketStartTime, bucketEndTime
+            };
+            lod.hasCurrentBucket = true;
+        }
+        else
+        {
+            // Update current bucket's min/max
+            lod.currentBucket.minMomentary = std::min(lod.currentBucket.minMomentary, point.momentary);
+            lod.currentBucket.maxMomentary = std::max(lod.currentBucket.maxMomentary, point.momentary);
+            lod.currentBucket.minShortTerm = std::min(lod.currentBucket.minShortTerm, point.shortTerm);
+            lod.currentBucket.maxShortTerm = std::max(lod.currentBucket.maxShortTerm, point.shortTerm);
+        }
+    }
 }
 
 void LoudnessDataStore::processRingBufferToLOD()
 {
-    size_t currentWrite = writeIndex.load(std::memory_order_acquire);
-    size_t count = pointCount.load(std::memory_order_relaxed);
+    size_t currentCount = totalPointCount.load(std::memory_order_acquire);
     
-    if (count == 0) return;
+    if (currentCount <= lastProcessedCount)
+        return;
     
-    // Process new points from ring buffer into LOD
-    while (lastProcessedIndex != currentWrite)
+    size_t currentWriteIdx = writeIndex.load(std::memory_order_acquire);
+    size_t availableInBuffer = std::min(currentCount, kRingBufferSize);
+    size_t oldestIndexInBuffer = (currentWriteIdx + kRingBufferSize - availableInBuffer) % kRingBufferSize;
+    
+    // Calculate how many new points we need to process
+    size_t newPoints = currentCount - lastProcessedCount;
+    
+    // Don't process more than what's in the buffer
+    newPoints = std::min(newPoints, availableInBuffer);
+    
+    // Calculate starting index
+    size_t startIdx;
+    if (newPoints >= availableInBuffer)
     {
-        const auto& point = ringBuffer[lastProcessedIndex];
-        
-        // Add to LOD level 0 (full resolution min/max, but we aggregate every 4 points)
-        for (size_t level = 0; level < kLodLevels; ++level)
-        {
-            auto& lod = lodLevels[level];
-            
-            lod.accumulator.minMomentary = std::min(lod.accumulator.minMomentary, point.momentary);
-            lod.accumulator.maxMomentary = std::max(lod.accumulator.maxMomentary, point.momentary);
-            lod.accumulator.minShortTerm = std::min(lod.accumulator.minShortTerm, point.shortTerm);
-            lod.accumulator.maxShortTerm = std::max(lod.accumulator.maxShortTerm, point.shortTerm);
-            lod.accumulator.timestamp = point.timestamp;
-            lod.accumulatorCount++;
-            
-            if (lod.accumulatorCount >= lod.reductionFactor)
-            {
-                lod.points.push_back(lod.accumulator);
-                lod.accumulator = MinMaxPoint{100.0f, -100.0f, 100.0f, -100.0f, 0.0};
-                lod.accumulatorCount = 0;
-            }
-        }
-        
-        lastProcessedIndex = (lastProcessedIndex + 1) % kRingBufferSize;
+        startIdx = oldestIndexInBuffer;
     }
+    else
+    {
+        startIdx = (currentWriteIdx + kRingBufferSize - newPoints) % kRingBufferSize;
+    }
+    
+    // Process each new point
+    for (size_t i = 0; i < newPoints; ++i)
+    {
+        size_t idx = (startIdx + i) % kRingBufferSize;
+        addPointToLOD(ringBuffer[idx]);
+    }
+    
+    lastProcessedCount = currentCount;
 }
 
-int LoudnessDataStore::selectLodLevel(double timeRange, int maxPixels) const
+int LoudnessDataStore::selectLodLevel(double timeRange, int maxPixels, int currentLod) const
 {
     if (maxPixels <= 0) return 0;
     
-    double pointsNeeded = timeRange * updateRate;
-    double pointsPerPixel = pointsNeeded / static_cast<double>(maxPixels);
+    // Calculate ideal points per pixel (we want 2-4 for smooth rendering)
+    double targetPointsPerPixel = 3.0;
+    double idealBucketDuration = timeRange / (static_cast<double>(maxPixels) * targetPointsPerPixel);
     
-    // We want roughly 2-4 points per pixel for smooth rendering
-    for (int level = static_cast<int>(kLodLevels) - 1; level >= 0; --level)
+    // Find the best LOD level
+    int bestLevel = 0;
+    for (int level = 0; level < static_cast<int>(kLodLevels); ++level)
     {
-        double effectivePPP = pointsPerPixel / static_cast<double>(lodLevels[static_cast<size_t>(level)].reductionFactor);
-        if (effectivePPP >= 1.5)
-            return level;
-    }
-    
-    return 0;
-}
-
-void LoudnessDataStore::getRecentPoints(double startTime, double endTime, int maxPixels, RenderData& result)
-{
-    size_t count = pointCount.load(std::memory_order_acquire);
-    if (count == 0) return;
-    
-    size_t currentWrite = writeIndex.load(std::memory_order_acquire);
-    size_t available = std::min(count, kRingBufferSize);
-    
-    // Calculate start index in ring buffer
-    size_t startIdx = (currentWrite + kRingBufferSize - available) % kRingBufferSize;
-    
-    // Collect points in time range
-    std::vector<LoudnessPoint> tempPoints;
-    tempPoints.reserve(available);
-    
-    for (size_t i = 0; i < available; ++i)
-    {
-        size_t idx = (startIdx + i) % kRingBufferSize;
-        const auto& point = ringBuffer[idx];
-        
-        if (point.timestamp >= startTime && point.timestamp <= endTime)
+        if (lodLevels[static_cast<size_t>(level)].bucketDuration <= idealBucketDuration)
         {
-            tempPoints.push_back(point);
+            bestLevel = level;
         }
     }
     
-    if (tempPoints.empty()) return;
-    
-    // Downsample with min/max preservation if needed
-    size_t numPoints = tempPoints.size();
-    size_t targetPoints = static_cast<size_t>(maxPixels * 2); // 2 points per pixel for min/max
-    
-    if (numPoints <= targetPoints)
+    // Apply hysteresis to prevent flickering between levels
+    if (bestLevel != currentLod)
     {
-        result.points = std::move(tempPoints);
-        result.useMinMax = false;
-    }
-    else
-    {
-        // Bucket the points and compute min/max per bucket
-        size_t bucketSize = (numPoints + targetPoints - 1) / targetPoints;
-        result.minMaxPoints.reserve(targetPoints);
+        double currentBucketDuration = lodLevels[static_cast<size_t>(currentLod)].bucketDuration;
+        double bestBucketDuration = lodLevels[static_cast<size_t>(bestLevel)].bucketDuration;
         
-        for (size_t i = 0; i < numPoints; i += bucketSize)
+        // Only switch if we've moved significantly past the threshold
+        if (bestLevel > currentLod)
         {
-            MinMaxPoint mm{100.0f, -100.0f, 100.0f, -100.0f, 0.0};
-            size_t end = std::min(i + bucketSize, numPoints);
-            
-            for (size_t j = i; j < end; ++j)
+            // Switching to coarser LOD - require more zoom out
+            if (idealBucketDuration < currentBucketDuration * kLodFactor * kLodHysteresis)
             {
-                mm.minMomentary = std::min(mm.minMomentary, tempPoints[j].momentary);
-                mm.maxMomentary = std::max(mm.maxMomentary, tempPoints[j].momentary);
-                mm.minShortTerm = std::min(mm.minShortTerm, tempPoints[j].shortTerm);
-                mm.maxShortTerm = std::max(mm.maxShortTerm, tempPoints[j].shortTerm);
+                return currentLod; // Stay at current level
             }
-            mm.timestamp = tempPoints[(i + end) / 2].timestamp;
-            result.minMaxPoints.push_back(mm);
         }
-        result.useMinMax = true;
-    }
-}
-
-void LoudnessDataStore::getLODPoints(double startTime, double endTime, int maxPixels, RenderData& result)
-{
-    double timeRange = endTime - startTime;
-    result.lodLevel = selectLodLevel(timeRange, maxPixels);
-    result.zoomFactor = timeRange;
-    
-    const auto& lod = lodLevels[static_cast<size_t>(result.lodLevel)];
-    
-    if (lod.points.empty()) return;
-    
-    double reductionFactor = static_cast<double>(lod.reductionFactor);
-    double effectiveRate = updateRate / reductionFactor;
-    
-    // Find index range
-    int64_t startIdx = static_cast<int64_t>(startTime * effectiveRate);
-    int64_t endIdx = static_cast<int64_t>(std::ceil(endTime * effectiveRate));
-    
-    startIdx = std::max(int64_t(0), startIdx);
-    endIdx = std::min(static_cast<int64_t>(lod.points.size()), endIdx);
-    
-    if (startIdx >= endIdx) return;
-    
-    size_t numPoints = static_cast<size_t>(endIdx - startIdx);
-    size_t targetPoints = static_cast<size_t>(maxPixels);
-    
-    if (numPoints <= targetPoints * 2)
-    {
-        // Few enough points - copy directly
-        result.minMaxPoints.reserve(numPoints);
-        for (int64_t i = startIdx; i < endIdx; ++i)
+        else
         {
-            result.minMaxPoints.push_back(lod.points[static_cast<size_t>(i)]);
-        }
-    }
-    else
-    {
-        // Further downsample with min/max preservation
-        size_t bucketSize = (numPoints + targetPoints - 1) / targetPoints;
-        result.minMaxPoints.reserve(targetPoints);
-        
-        for (size_t i = 0; i < numPoints; i += bucketSize)
-        {
-            MinMaxPoint mm{100.0f, -100.0f, 100.0f, -100.0f, 0.0};
-            size_t end = std::min(i + bucketSize, numPoints);
-            
-            for (size_t j = i; j < end; ++j)
+            // Switching to finer LOD - require more zoom in
+            if (idealBucketDuration > bestBucketDuration * kLodHysteresis)
             {
-                size_t idx = static_cast<size_t>(startIdx) + j;
-                const auto& p = lod.points[idx];
-                mm.minMomentary = std::min(mm.minMomentary, p.minMomentary);
-                mm.maxMomentary = std::max(mm.maxMomentary, p.maxMomentary);
-                mm.minShortTerm = std::min(mm.minShortTerm, p.minShortTerm);
-                mm.maxShortTerm = std::max(mm.maxShortTerm, p.maxShortTerm);
+                return currentLod; // Stay at current level
             }
-            size_t midIdx = static_cast<size_t>(startIdx) + (i + end) / 2;
-            mm.timestamp = lod.points[std::min(midIdx, lod.points.size() - 1)].timestamp;
-            result.minMaxPoints.push_back(mm);
         }
     }
-    result.useMinMax = true;
+    
+    return bestLevel;
 }
 
 LoudnessDataStore::RenderData LoudnessDataStore::getDataForTimeRange(
     double startTime, double endTime, int maxPixels)
 {
     RenderData result;
-    result.zoomFactor = endTime - startTime;
     
     if (maxPixels <= 0 || endTime <= startTime)
         return result;
     
-    double currentTime = currentTimestamp.load(std::memory_order_acquire);
-    double ringBufferDuration = static_cast<double>(kRingBufferSize) / updateRate;
-    double ringBufferStartTime = currentTime - ringBufferDuration;
+    double timeRange = endTime - startTime;
     
-    // If requesting recent data that's still in ring buffer
-    if (startTime >= ringBufferStartTime)
-    {
-        getRecentPoints(startTime, endTime, maxPixels, result);
-        return result;
-    }
-    
-    // Otherwise use LOD data
+    // Process any new data from ring buffer
     {
         std::lock_guard<std::mutex> lock(lodMutex);
         processRingBufferToLOD();
-        getLODPoints(startTime, endTime, maxPixels, result);
+        
+        // Select LOD level with hysteresis
+        result.lodLevel = selectLodLevel(timeRange, maxPixels, lastSelectedLod);
+        lastSelectedLod = result.lodLevel;
+        lastTimeRange = timeRange;
+        
+        const auto& lod = lodLevels[static_cast<size_t>(result.lodLevel)];
+        result.bucketDuration = lod.bucketDuration;
+        
+        if (lod.buckets.empty() && !lod.hasCurrentBucket)
+            return result;
+        
+        // Find buckets that overlap with the requested time range
+        // Using fixed time-aligned boundaries, we can calculate indices directly
+        double bucketDuration = lod.bucketDuration;
+        int64_t startBucketIdx = static_cast<int64_t>(std::floor(startTime / bucketDuration));
+        int64_t endBucketIdx = static_cast<int64_t>(std::ceil(endTime / bucketDuration));
+        
+        startBucketIdx = std::max(int64_t(0), startBucketIdx);
+        
+        // Reserve space
+        size_t estimatedPoints = static_cast<size_t>(endBucketIdx - startBucketIdx + 1);
+        result.points.reserve(std::min(estimatedPoints, lod.buckets.size() + 1));
+        
+        // Binary search for start position
+        auto it = std::lower_bound(lod.buckets.begin(), lod.buckets.end(), startTime,
+            [](const MinMaxPoint& bucket, double time) {
+                return bucket.endTime <= time;
+            });
+        
+        // Collect buckets in range
+        while (it != lod.buckets.end() && it->startTime < endTime)
+        {
+            result.points.push_back(*it);
+            ++it;
+        }
+        
+        // Include current bucket if it overlaps
+        if (lod.hasCurrentBucket && 
+            lod.currentBucket.startTime < endTime && 
+            lod.currentBucket.endTime > startTime)
+        {
+            result.points.push_back(lod.currentBucket);
+        }
     }
     
     return result;
