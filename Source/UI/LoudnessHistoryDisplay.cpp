@@ -1,6 +1,22 @@
 #include "LoudnessHistoryDisplay.h"
 #include <cmath>
 
+namespace
+{
+    constexpr float kFloatEpsilon = 0.0001f;
+    constexpr double kDoubleEpsilon = 0.0001;
+    
+    bool floatEqual(float a, float b)
+    {
+        return std::abs(a - b) < kFloatEpsilon;
+    }
+    
+    bool doubleEqual(double a, double b)
+    {
+        return std::abs(a - b) < kDoubleEpsilon;
+    }
+}
+
 LoudnessHistoryDisplay::LoudnessHistoryDisplay(LoudnessDataStore& store)
     : dataStore(store)
 {
@@ -47,7 +63,7 @@ void LoudnessHistoryDisplay::timerCallback()
     }
     
     // Check if data has changed
-    if (dataCurrentTime != lastDataTime)
+    if (!doubleEqual(dataCurrentTime, lastDataTime))
     {
         lastDataTime = dataCurrentTime;
         pathsNeedRebuild = true;
@@ -72,10 +88,10 @@ void LoudnessHistoryDisplay::paint(juce::Graphics& g)
         return;
     
     // Check if we need to rebuild paths
-    bool viewChanged = (viewStartTime != lastViewStartTime ||
-                        viewTimeRange != lastViewTimeRange ||
-                        viewMinLufs != lastViewMinLufs ||
-                        viewMaxLufs != lastViewMaxLufs ||
+    bool viewChanged = (!doubleEqual(viewStartTime, lastViewStartTime) ||
+                        !doubleEqual(viewTimeRange, lastViewTimeRange) ||
+                        !floatEqual(viewMinLufs, lastViewMinLufs) ||
+                        !floatEqual(viewMaxLufs, lastViewMaxLufs) ||
                         getWidth() != lastWidth ||
                         getHeight() != lastHeight);
     
@@ -357,7 +373,7 @@ void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
         
         float x = timeToX(t);
         
-        if (x < 0 || x > width) continue;
+        if (x < 0.0f || x > width) continue;
         
         // Draw at sub-pixel position for smooth scrolling
         g.setColour(gridColour);
@@ -443,8 +459,11 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
                juce::Justification::left);
     g.setFont(18.0f);
     
-    juce::String momentaryStr = currentMomentary > -100.0f ? 
-        juce::String(currentMomentary, 1) + " LUFS" : "-inf LUFS";
+    juce::String momentaryStr;
+    if (currentMomentary > -100.0f)
+        momentaryStr = juce::String(currentMomentary, 1) + " LUFS";
+    else
+        momentaryStr = "-inf LUFS";
     g.drawText(momentaryStr, momentaryBox.reduced(5, 0), 
                juce::Justification::left);
     
@@ -458,8 +477,11 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
                juce::Justification::left);
     g.setFont(18.0f);
     
-    juce::String shortTermStr = currentShortTerm > -100.0f ? 
-        juce::String(shortTermStr, 1) + " LUFS" : "-inf LUFS";
+    juce::String shortTermStr;
+    if (currentShortTerm > -100.0f)
+        shortTermStr = juce::String(currentShortTerm, 1) + " LUFS";
+    else
+        shortTermStr = "-inf LUFS";
     g.drawText(shortTermStr, shortTermBox.reduced(5, 0), 
                juce::Justification::left);
     
@@ -522,7 +544,13 @@ void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
     juce::String pointsStr = juce::String(cachedRenderData.points.size()) + " pts";
     
     // Zoom/scroll status
-    juce::String statusStr = isZooming ? "[ZOOM]" : (isDragging ? "[DRAG]" : "[AUTO]");
+    juce::String statusStr;
+    if (isZooming)
+        statusStr = "[ZOOM]";
+    else if (isDragging)
+        statusStr = "[DRAG]";
+    else
+        statusStr = "[AUTO]";
     
     juce::String infoStr = "X: " + timeStr + " | Y: " + lufsStr + " | " + 
                            lodStr + " (" + bucketStr + ") | " + pointsStr + " " + statusStr;
