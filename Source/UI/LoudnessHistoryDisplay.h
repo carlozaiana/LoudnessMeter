@@ -33,7 +33,6 @@ private:
     
     float timeToX(double time) const;
     float loudnessToY(float lufs) const;
-    int snapToPixel(float value) const;
     
     LoudnessDataStore& dataStore;
     
@@ -57,29 +56,39 @@ private:
     juce::Point<float> lastMousePos;
     bool isDragging{false};
     
+    // Zoom state - disable auto-scroll during zoom
+    bool isZooming{false};
+    double zoomCooldownTime{0.0};
+    static constexpr double kZoomCooldownDuration = 0.3; // seconds after zoom before auto-scroll resumes
+    
     // Colors
     const juce::Colour backgroundColour = juce::Colour(16, 30, 50);
     const juce::Colour momentaryColour = juce::Colour(45, 132, 107);
     const juce::Colour shortTermColour = juce::Colour(146, 173, 196);
-    const juce::Colour gridColour = juce::Colour(255, 255, 255).withAlpha(0.12f);
+    const juce::Colour gridColour = juce::Colour(255, 255, 255).withAlpha(0.15f);
     const juce::Colour textColour = juce::Colour(200, 200, 200);
     
     // Cached render data
     LoudnessDataStore::RenderData cachedRenderData;
     
-    // Cached paths for efficient rendering
-    juce::Path momentaryPath;
-    juce::Path shortTermPath;
+    // Cached paths
+    juce::Path momentaryLinePath;
+    juce::Path shortTermLinePath;
     juce::Path momentaryFillPath;
     juce::Path shortTermFillPath;
     
-    // State tracking for cache invalidation
+    // State tracking
     double lastViewStartTime{0.0};
     double lastViewTimeRange{0.0};
+    float lastViewMinLufs{-60.0f};
+    float lastViewMaxLufs{0.0f};
     int lastWidth{0};
     int lastHeight{0};
     double lastDataTime{0.0};
     bool pathsNeedRebuild{true};
+    
+    // Time tracking for zoom cooldown
+    double lastTimerTime{0.0};
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessHistoryDisplay)
 };
