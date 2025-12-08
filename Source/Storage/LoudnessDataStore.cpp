@@ -1,5 +1,6 @@
 #include "LoudnessDataStore.h"
 #include <algorithm>
+#include <cmath>
 
 LoudnessDataStore::LoudnessDataStore()
 {
@@ -30,7 +31,7 @@ void LoudnessDataStore::addPoint(float momentary, float shortTerm)
     }
     else
     {
-        // Circular overwrite for very long sessions
+        // Circular overwrite
         size_t idx = dataBuffer.size() % kMaxPoints;
         dataBuffer[idx] = {momentary, shortTerm, timestamp};
     }
@@ -53,15 +54,39 @@ std::vector<LoudnessDataStore::LoudnessPoint> LoudnessDataStore::getPointsInRang
     if (dataBuffer.empty() || endTime <= startTime)
         return result;
     
-    // Binary search for start
-    auto startIt = std::lower_bound(dataBuffer.begin(), dataBuffer.end(), startTime,
-        [](const LoudnessPoint& p, double t) { return p.timestamp < t; });
-    
-    // Collect points up to endTime
-    for (auto it = startIt; it != dataBuffer.end() && it->timestamp < endTime; ++it)
+    // Estimate start index
+    size_t startIdx = 0;
+    if (startTime > 0)
     {
-        result.push_back(*it);
+        startIdx = static_cast<size_t>(std::max(0.0, startTime * updateRate));
+        startIdx = std::min(startIdx, dataBuffer.size());
+    }
+    
+    // Collect points
+    result.reserve(static_cast<size_t>((endTime - startTime) * updateRate) + 10);
+    
+    for (size_t i = startIdx; i < dataBuffer.size(); ++i)
+    {
+        const auto& p = dataBuffer[i];
+        if (p.timestamp >= endTime)
+            break;
+        if (p.timestamp >= startTime)
+            result.push_back(p);
     }
     
     return result;
+}
+
+LoudnessDataStore::LoudnessPoint LoudnessDataStore::getPointAtTime(double time) const
+{
+    std::lock_guard<std::mutex> lock(dataMutex);
+    
+    if (dataBuffer.empty() || time < 0)
+        return {-100.0f, -100.0f, 0.0};
+    
+    size_t idx = static_cast<size_t>(time * updateRate);
+    if (idx >= dataBuffer.size())
+        idx = dataBuffer.size() - 1;
+    
+    return dataBuffer[idx];
 }

@@ -21,17 +21,13 @@ public:
     void prepare(double updateRateHz);
     void reset();
     
-    // Called from audio thread via timer
     void addPoint(float momentary, float shortTerm);
     
-    // Get current data time
     double getCurrentTime() const;
-    
-    // Get points in time range (inclusive of startTime, exclusive of endTime)
-    std::vector<LoudnessPoint> getPointsInRange(double startTime, double endTime) const;
-    
-    // Get update rate
     double getUpdateRate() const { return updateRate; }
+    
+    std::vector<LoudnessPoint> getPointsInRange(double startTime, double endTime) const;
+    LoudnessPoint getPointAtTime(double time) const;
 
 private:
     static constexpr size_t kMaxPoints = 180000; // 5 hours at 10 Hz
