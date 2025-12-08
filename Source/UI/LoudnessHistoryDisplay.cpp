@@ -16,6 +16,17 @@ LoudnessHistoryDisplay::~LoudnessHistoryDisplay()
 
 void LoudnessHistoryDisplay::timerCallback()
 {
+    double currentTime = dataStore.getCurrentTime();
+    
+    // Check if we need to update
+    bool needsUpdate = (currentTime != lastDataTime);
+    
+    if (needsUpdate)
+    {
+        lastDataTime = currentTime;
+        pathsValid = false;
+    }
+    
     repaint();
 }
 
@@ -27,7 +38,9 @@ void LoudnessHistoryDisplay::setCurrentLoudness(float momentary, float shortTerm
 
 float LoudnessHistoryDisplay::timeToX(double time) const
 {
-    double normalized = (time - displayStartTime) / (displayEndTime - displayStartTime);
+    // displayStartTime maps to 0, displayEndTime maps to width
+    // But we DON'T clamp displayStartTime, so negative times map to negative X
+    double normalized = (time - displayStartTime) / viewTimeRange;
     return static_cast<float>(normalized * getWidth());
 }
 
@@ -37,26 +50,192 @@ float LoudnessHistoryDisplay::lufsToY(float lufs) const
     return normalized * static_cast<float>(getHeight());
 }
 
-void LoudnessHistoryDisplay::paint(juce::Graphics& g)
+void LoudnessHistoryDisplay::updateCachedData()
 {
-    // Calculate display time window (right edge is current time minus delay)
     double currentTime = dataStore.getCurrentTime();
+    
+    // Display window: right edge is currentTime - delay
     displayEndTime = currentTime - kDisplayDelay;
     displayStartTime = displayEndTime - viewTimeRange;
     
-    // Clamp start time to 0
-    if (displayStartTime < 0.0)
-        displayStartTime = 0.0;
+    // DON'T clamp displayStartTime to 0 - this keeps scale constant
+    // We just won't have data for times < 0
     
-    // Query data for current view
-    int numBuckets = getWidth();
-    if (numBuckets > 0 && displayEndTime > displayStartTime)
+    int width = getWidth();
+    
+    // Check if cache is still valid
+    double queryStart = std::max(0.0, displayStartTime);
+    double queryEnd = std::max(0.0, displayEndTime);
+    
+    bool cacheValid = (std::abs(queryStart - lastQueryStartTime) < 0.001 &&
+                       std::abs(queryEnd - lastQueryEndTime) < 0.001 &&
+                       width == lastQueryWidth &&
+                       pathsValid);
+    
+    if (!cacheValid && width > 0 && queryEnd > queryStart)
     {
-        cachedData = dataStore.getMinMaxForRange(displayStartTime, displayEndTime, numBuckets);
+        cachedData = dataStore.getDataForTimeRange(queryStart, queryEnd, width);
+        lastQueryStartTime = queryStart;
+        lastQueryEndTime = queryEnd;
+        lastQueryWidth = width;
+        pathsValid = false;
     }
-    else
+}
+
+void LoudnessHistoryDisplay::addCatmullRomSpline(juce::Path& path,
+                                                   const std::vector<juce::Point<float>>& points,
+                                                   bool startPath)
+{
+    if (points.size() < 2)
+        return;
+    
+    if (points.size() == 2)
     {
-        cachedData.clear();
+        if (startPath)
+            path.startNewSubPath(points[0]);
+        path.lineTo(points[1]);
+        return;
+    }
+    
+    // Catmull-Rom to Bezier conversion
+    // For each segment between points[i] and points[i+1],
+    // we need points[i-1] and points[i+2] for tangent calculation
+    
+    const float tension = 0.5f; // Controls curve tightness (0.5 = Catmull-Rom)
+    
+    for (size_t i = 0; i < points.size() - 1; ++i)
+    {
+        const auto& p1 = points[i];
+        const auto& p2 = points[i + 1];
+        
+        // Get neighboring points (with clamping at ends)
+        const auto& p0 = (i > 0) ? points[i - 1] : p1;
+        const auto& p3 = (i + 2 < points.size()) ? points[i + 2] : p2;
+        
+        if (i == 0 && startPath)
+        {
+            path.startNewSubPath(p1);
+        }
+        
+        // Calculate control points for cubic Bezier
+        float cp1x = p1.x + (p2.x - p0.x) * tension / 3.0f;
+        float cp1y = p1.y + (p2.y - p0.y) * tension / 3.0f;
+        float cp2x = p2.x - (p3.x - p1.x) * tension / 3.0f;
+        float cp2y = p2.y - (p3.y - p1.y) * tension / 3.0f;
+        
+        path.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+}
+
+void LoudnessHistoryDisplay::buildPaths()
+{
+    momentaryFillPath.clear();
+    momentaryLinePath.clear();
+    shortTermFillPath.clear();
+    shortTermLinePath.clear();
+    
+    if (cachedData.points.empty())
+    {
+        pathsValid = true;
+        return;
+    }
+    
+    std::vector<juce::Point<float>> mTopPts;
+    std::vector<juce::Point<float>> mBotPts;
+    std::vector<juce::Point<float>> mMidPts;
+    
+    std::vector<juce::Point<float>> sTopPts;
+    std::vector<juce::Point<float>> sBotPts;
+    std::vector<juce::Point<float>> sMidPts;
+    
+    float height = static_cast<float>(getHeight());
+    
+    for (const auto& pt : cachedData.points)
+    {
+        float x = timeToX(pt.timeMid);
+        
+        // Skip points outside visible area (with some margin)
+        if (x < -50.0f || x > getWidth() + 50.0f)
+            continue;
+        
+        // Momentary
+        if (pt.hasValidMomentary())
+        {
+            float yTop = lufsToY(pt.momentaryMax);
+            float yBot = lufsToY(pt.momentaryMin);
+            float yMid = (yTop + yBot) * 0.5f;
+            
+            yTop = juce::jlimit(0.0f, height, yTop);
+            yBot = juce::jlimit(0.0f, height, yBot);
+            yMid = juce::jlimit(0.0f, height, yMid);
+            
+            mTopPts.push_back({x, yTop});
+            mBotPts.push_back({x, yBot});
+            mMidPts.push_back({x, yMid});
+        }
+        
+        // Short-term
+        if (pt.hasValidShortTerm())
+        {
+            float yTop = lufsToY(pt.shortTermMax);
+            float yBot = lufsToY(pt.shortTermMin);
+            float yMid = (yTop + yBot) * 0.5f;
+            
+            yTop = juce::jlimit(0.0f, height, yTop);
+            yBot = juce::jlimit(0.0f, height, yBot);
+            yMid = juce::jlimit(0.0f, height, yMid);
+            
+            sTopPts.push_back({x, yTop});
+            sBotPts.push_back({x, yBot});
+            sMidPts.push_back({x, yMid});
+        }
+    }
+    
+    // Build momentary fill (top edge forward, bottom edge backward)
+    if (mTopPts.size() >= 2)
+    {
+        addCatmullRomSpline(momentaryFillPath, mTopPts, true);
+        
+        // Reverse bottom points and add them
+        std::vector<juce::Point<float>> mBotReversed(mBotPts.rbegin(), mBotPts.rend());
+        addCatmullRomSpline(momentaryFillPath, mBotReversed, false);
+        
+        momentaryFillPath.closeSubPath();
+    }
+    
+    // Build momentary line
+    if (mMidPts.size() >= 2)
+    {
+        addCatmullRomSpline(momentaryLinePath, mMidPts, true);
+    }
+    
+    // Build short-term fill
+    if (sTopPts.size() >= 2)
+    {
+        addCatmullRomSpline(shortTermFillPath, sTopPts, true);
+        
+        std::vector<juce::Point<float>> sBotReversed(sBotPts.rbegin(), sBotPts.rend());
+        addCatmullRomSpline(shortTermFillPath, sBotReversed, false);
+        
+        shortTermFillPath.closeSubPath();
+    }
+    
+    // Build short-term line
+    if (sMidPts.size() >= 2)
+    {
+        addCatmullRomSpline(shortTermLinePath, sMidPts, true);
+    }
+    
+    pathsValid = true;
+}
+
+void LoudnessHistoryDisplay::paint(juce::Graphics& g)
+{
+    updateCachedData();
+    
+    if (!pathsValid)
+    {
+        buildPaths();
     }
     
     drawBackground(g);
@@ -73,146 +252,29 @@ void LoudnessHistoryDisplay::drawBackground(juce::Graphics& g)
 
 void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
 {
-    if (cachedData.empty())
-        return;
-    
-    int w = getWidth();
-    int h = getHeight();
-    
-    if (w <= 0 || h <= 0)
-        return;
-    
-    // Build paths for momentary
-    juce::Path mFillPath;
-    juce::Path mLinePath;
-    
-    // Build paths for short-term
-    juce::Path sFillPath;
-    juce::Path sLinePath;
-    
-    // Collect valid points
-    std::vector<juce::Point<float>> mTopPts;
-    std::vector<juce::Point<float>> mBotPts;
-    std::vector<juce::Point<float>> mMidPts;
-    
-    std::vector<juce::Point<float>> sTopPts;
-    std::vector<juce::Point<float>> sBotPts;
-    std::vector<juce::Point<float>> sMidPts;
-    
-    float pixelWidth = static_cast<float>(w) / static_cast<float>(cachedData.size());
-    
-    for (size_t i = 0; i < cachedData.size(); ++i)
-    {
-        const auto& bucket = cachedData[i];
-        float x = static_cast<float>(i) * pixelWidth + pixelWidth * 0.5f;
-        
-        // Momentary
-        if (bucket.momentaryMax > -100.0f)
-        {
-            float yTop = lufsToY(bucket.momentaryMax);
-            float yBot = lufsToY(bucket.momentaryMin);
-            float yMid = (yTop + yBot) * 0.5f;
-            
-            // Clamp to view
-            yTop = juce::jlimit(0.0f, static_cast<float>(h), yTop);
-            yBot = juce::jlimit(0.0f, static_cast<float>(h), yBot);
-            yMid = juce::jlimit(0.0f, static_cast<float>(h), yMid);
-            
-            mTopPts.push_back({x, yTop});
-            mBotPts.push_back({x, yBot});
-            mMidPts.push_back({x, yMid});
-        }
-        
-        // Short-term
-        if (bucket.shortTermMax > -100.0f)
-        {
-            float yTop = lufsToY(bucket.shortTermMax);
-            float yBot = lufsToY(bucket.shortTermMin);
-            float yMid = (yTop + yBot) * 0.5f;
-            
-            yTop = juce::jlimit(0.0f, static_cast<float>(h), yTop);
-            yBot = juce::jlimit(0.0f, static_cast<float>(h), yBot);
-            yMid = juce::jlimit(0.0f, static_cast<float>(h), yMid);
-            
-            sTopPts.push_back({x, yTop});
-            sBotPts.push_back({x, yBot});
-            sMidPts.push_back({x, yMid});
-        }
-    }
-    
-    // Build momentary fill path
-    if (mTopPts.size() >= 2)
-    {
-        mFillPath.startNewSubPath(mTopPts[0]);
-        for (size_t i = 1; i < mTopPts.size(); ++i)
-        {
-            mFillPath.lineTo(mTopPts[i]);
-        }
-        for (auto it = mBotPts.rbegin(); it != mBotPts.rend(); ++it)
-        {
-            mFillPath.lineTo(*it);
-        }
-        mFillPath.closeSubPath();
-    }
-    
-    // Build momentary line path
-    if (mMidPts.size() >= 2)
-    {
-        mLinePath.startNewSubPath(mMidPts[0]);
-        for (size_t i = 1; i < mMidPts.size(); ++i)
-        {
-            mLinePath.lineTo(mMidPts[i]);
-        }
-    }
-    
-    // Build short-term fill path
-    if (sTopPts.size() >= 2)
-    {
-        sFillPath.startNewSubPath(sTopPts[0]);
-        for (size_t i = 1; i < sTopPts.size(); ++i)
-        {
-            sFillPath.lineTo(sTopPts[i]);
-        }
-        for (auto it = sBotPts.rbegin(); it != sBotPts.rend(); ++it)
-        {
-            sFillPath.lineTo(*it);
-        }
-        sFillPath.closeSubPath();
-    }
-    
-    // Build short-term line path
-    if (sMidPts.size() >= 2)
-    {
-        sLinePath.startNewSubPath(sMidPts[0]);
-        for (size_t i = 1; i < sMidPts.size(); ++i)
-        {
-            sLinePath.lineTo(sMidPts[i]);
-        }
-    }
-    
     // Draw momentary (behind)
-    if (!mFillPath.isEmpty())
+    if (!momentaryFillPath.isEmpty())
     {
-        g.setColour(momentaryColour.withAlpha(0.4f));
-        g.fillPath(mFillPath);
+        g.setColour(momentaryColour.withAlpha(0.35f));
+        g.fillPath(momentaryFillPath);
     }
-    if (!mLinePath.isEmpty())
+    if (!momentaryLinePath.isEmpty())
     {
         g.setColour(momentaryColour);
-        g.strokePath(mLinePath, juce::PathStrokeType(1.5f,
+        g.strokePath(momentaryLinePath, juce::PathStrokeType(1.5f,
             juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
     
     // Draw short-term (on top)
-    if (!sFillPath.isEmpty())
+    if (!shortTermFillPath.isEmpty())
     {
-        g.setColour(shortTermColour.withAlpha(0.5f));
-        g.fillPath(sFillPath);
+        g.setColour(shortTermColour.withAlpha(0.45f));
+        g.fillPath(shortTermFillPath);
     }
-    if (!sLinePath.isEmpty())
+    if (!shortTermLinePath.isEmpty())
     {
         g.setColour(shortTermColour);
-        g.strokePath(sLinePath, juce::PathStrokeType(2.0f,
+        g.strokePath(shortTermLinePath, juce::PathStrokeType(2.0f,
             juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 }
@@ -245,25 +307,21 @@ void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
     }
     
     // Vertical grid lines (time)
-    double timeRange = displayEndTime - displayStartTime;
-    
     double timeStep = 1.0;
-    if (timeRange > 30.0) timeStep = 5.0;
-    if (timeRange > 60.0) timeStep = 10.0;
-    if (timeRange > 300.0) timeStep = 60.0;
-    if (timeRange > 900.0) timeStep = 300.0;
-    if (timeRange > 3600.0) timeStep = 600.0;
-    if (timeRange > 7200.0) timeStep = 1800.0;
-    if (timeRange < 5.0) timeStep = 0.5;
-    if (timeRange < 2.0) timeStep = 0.25;
+    if (viewTimeRange > 30.0) timeStep = 5.0;
+    if (viewTimeRange > 60.0) timeStep = 10.0;
+    if (viewTimeRange > 300.0) timeStep = 60.0;
+    if (viewTimeRange > 900.0) timeStep = 300.0;
+    if (viewTimeRange > 3600.0) timeStep = 600.0;
+    if (viewTimeRange > 7200.0) timeStep = 1800.0;
+    if (viewTimeRange < 5.0) timeStep = 0.5;
+    if (viewTimeRange < 2.0) timeStep = 0.25;
     
-    double gridStart = std::floor(displayStartTime / timeStep) * timeStep;
+    // Start from 0 or displayStartTime, whichever is larger
+    double gridStart = std::max(0.0, std::floor(displayStartTime / timeStep) * timeStep);
     
     for (double t = gridStart; t <= displayEndTime + timeStep; t += timeStep)
     {
-        if (t < displayStartTime)
-            continue;
-        
         float x = timeToX(t);
         
         if (x < 0 || x > w)
@@ -350,6 +408,7 @@ void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
 {
     int w = getWidth();
     
+    // Time range
     juce::String timeStr;
     if (viewTimeRange >= 3600.0)
         timeStr = juce::String(viewTimeRange / 3600.0, 2) + " hrs";
@@ -358,26 +417,36 @@ void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
     else
         timeStr = juce::String(viewTimeRange, 1) + " sec";
     
+    // LUFS range
     float lufsRange = viewMaxLufs - viewMinLufs;
     juce::String lufsStr = juce::String(static_cast<int>(lufsRange)) + " dB";
     
-    double msPerPixel = (viewTimeRange * 1000.0) / getWidth();
-    juce::String resStr;
-    if (msPerPixel >= 1000.0)
-        resStr = juce::String(msPerPixel / 1000.0, 1) + "s/px";
-    else
-        resStr = juce::String(static_cast<int>(msPerPixel)) + "ms/px";
+    // LOD level
+    juce::String lodStr = "LOD " + juce::String(cachedData.lodLevel);
     
-    juce::String info = "X: " + timeStr + " | Y: " + lufsStr + " | " + resStr;
+    // Bucket duration
+    juce::String bucketStr;
+    double bucketMs = cachedData.bucketDuration * 1000.0;
+    if (bucketMs >= 1000.0)
+        bucketStr = juce::String(cachedData.bucketDuration, 1) + "s";
+    else
+        bucketStr = juce::String(static_cast<int>(bucketMs)) + "ms";
+    
+    // Points count
+    juce::String ptsStr = juce::String(cachedData.points.size()) + " pts";
+    
+    juce::String info = "X: " + timeStr + " | Y: " + lufsStr + 
+                        " | " + lodStr + " (" + bucketStr + ") | " + ptsStr;
     
     g.setFont(10.0f);
     g.setColour(textColour.withAlpha(0.6f));
-    g.drawText(info, w - 300, 10, 290, 14, juce::Justification::right);
+    g.drawText(info, w - 380, 10, 370, 14, juce::Justification::right);
 }
 
 void LoudnessHistoryDisplay::resized()
 {
-    // Nothing needed - paths are rebuilt each frame
+    pathsValid = false;
+    lastQueryWidth = 0;
 }
 
 void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
@@ -416,6 +485,7 @@ void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
         viewTimeRange = juce::jlimit(kMinTimeRange, kMaxTimeRange, newRange);
     }
     
+    pathsValid = false;
     repaint();
 }
 
@@ -450,6 +520,7 @@ void LoudnessHistoryDisplay::mouseDrag(const juce::MouseEvent& event)
         viewMaxLufs = kAbsoluteMinLufs + lufsRange;
     }
     
+    pathsValid = false;
     repaint();
 }
 

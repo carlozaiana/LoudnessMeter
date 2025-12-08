@@ -24,6 +24,9 @@ public:
 private:
     void timerCallback() override;
     
+    void updateCachedData();
+    void buildPaths();
+    
     void drawBackground(juce::Graphics& g);
     void drawCurves(juce::Graphics& g);
     void drawGrid(juce::Graphics& g);
@@ -33,15 +36,23 @@ private:
     float timeToX(double time) const;
     float lufsToY(float lufs) const;
     
+    // Catmull-Rom spline helpers
+    void addCatmullRomSpline(juce::Path& path, 
+                              const std::vector<juce::Point<float>>& points,
+                              bool startPath);
+    
     LoudnessDataStore& dataStore;
     
-    // Fixed display delay
-    static constexpr double kDisplayDelay = 0.3; // 300ms
+    static constexpr double kDisplayDelay = 0.3;
     
     // View state
     double viewTimeRange{10.0};
     float viewMinLufs{-60.0f};
     float viewMaxLufs{0.0f};
+    
+    // Calculated display times (updated each frame)
+    double displayStartTime{0.0};
+    double displayEndTime{0.0};
     
     // View limits
     static constexpr double kMinTimeRange = 0.5;
@@ -54,15 +65,19 @@ private:
     float currentMomentary{-100.0f};
     float currentShortTerm{-100.0f};
     
-    // Cached data for current view
-    std::vector<LoudnessDataStore::MinMaxPoint> cachedData;
-    double cacheStartTime{0.0};
-    double cacheEndTime{0.0};
-    int cacheNumBuckets{0};
+    // Cached data
+    LoudnessDataStore::QueryResult cachedData;
+    double lastQueryStartTime{-1.0};
+    double lastQueryEndTime{-1.0};
+    int lastQueryWidth{0};
+    double lastDataTime{-1.0};
     
-    // Display state
-    double displayEndTime{0.0};
-    double displayStartTime{0.0};
+    // Cached paths (rebuilt when data or view changes)
+    juce::Path momentaryFillPath;
+    juce::Path momentaryLinePath;
+    juce::Path shortTermFillPath;
+    juce::Path shortTermLinePath;
+    bool pathsValid{false};
     
     // Mouse
     juce::Point<float> lastMousePos;
