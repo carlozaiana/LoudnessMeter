@@ -26,36 +26,41 @@ private:
     
     // Drawing methods
     void drawBackground(juce::Graphics& g);
-    void drawFromImageStrips(juce::Graphics& g);
+    void drawFromBitmap(juce::Graphics& g);
     void drawGrid(juce::Graphics& g);
     void drawCurrentValues(juce::Graphics& g);
     void drawZoomInfo(juce::Graphics& g);
     
-    // Image strip management
-    void initializeImageStrips();
-    void updateImageStrips();
-    void renderColumnToStrip(int lodLevel, int columnIndex, double startTime, double endTime);
-    void downsampleToHigherLODs(int fromColumn);
+    // Bitmap management
+    void initializeBitmaps();
+    void updateBitmaps();
+    void renderCurveChunkToBitmap(int lodLevel, double chunkStartTime, double chunkEndTime);
+    void clearBitmapRegion(int lodLevel, int startColumn, int numColumns);
     
-    // Coordinate conversion
+    // Coordinate helpers
     float lufsToImageY(float lufs) const;
+    float imageYToDisplayY(float imageY) const;
+    int timeToColumn(double time, int lodLevel) const;
     int getLodLevelForTimeRange(double timeRange) const;
     
     LoudnessDataStore& dataStore;
     
-    // Fixed Y range for rendering
+    // Fixed Y range for bitmap rendering
     static constexpr float kMinLufs = -90.0f;
     static constexpr float kMaxLufs = 0.0f;
-    static constexpr float kLufsRange = kMaxLufs - kMinLufs; // 90 dB
+    static constexpr float kLufsRange = kMaxLufs - kMinLufs;
+    
+    // Display delay for smooth rendering (400ms)
+    static constexpr double kDisplayDelaySeconds = 0.4;
     
     // View state
-    double viewTimeRange{10.0};      // Visible time range in seconds
-    float viewMinLufs{-60.0f};       // Current Y view min (for display scaling)
-    float viewMaxLufs{0.0f};         // Current Y view max (for display scaling)
+    double viewTimeRange{10.0};
+    float viewMinLufs{-60.0f};
+    float viewMaxLufs{0.0f};
     
     // Zoom limits
     static constexpr double kMinTimeRange = 0.5;
-    static constexpr double kMaxTimeRange = 18000.0; // 5 hours
+    static constexpr double kMaxTimeRange = 18000.0;
     static constexpr float kMinLufsRange = 6.0f;
     static constexpr float kMaxLufsRange = 90.0f;
     
@@ -75,42 +80,38 @@ private:
     const juce::Colour textColour = juce::Colour(200, 200, 200);
     
     // LOD configuration
-    // LOD 0: 100ms per pixel, max 1 minute (600 px)
-    // LOD 1: 1s per pixel, max 10 minutes (600 px)
-    // LOD 2: 3s per pixel, max 30 minutes (600 px)
-    // LOD 3: 12s per pixel, max 120 minutes (600 px)
-    // LOD 4: 60s per pixel, max 300 minutes (300 px)
-    
     static constexpr int kNumLodLevels = 5;
-    static constexpr int kImageHeight = 256; // Fixed height for rendering
+    static constexpr int kImageHeight = 512;
     
     struct LodConfig
     {
         double secondsPerPixel;
         double maxTimeRange;
-        int stripWidth;
+        int imageWidth;
+        int chunkSizePixels;  // How many pixels to render at once
     };
     
+    // LOD 0: 100ms/px, up to 1 min, render 4 pixels (400ms) at a time
+    // LOD 1: 500ms/px, up to 5 min, render 4 pixels (2s) at a time
+    // LOD 2: 2s/px, up to 20 min, render 4 pixels (8s) at a time
+    // LOD 3: 10s/px, up to 2 hrs, render 4 pixels (40s) at a time
+    // LOD 4: 30s/px, up to 5 hrs, render 4 pixels (2min) at a time
     static constexpr std::array<LodConfig, kNumLodLevels> kLodConfigs = {{
-        { 0.1,    60.0,   600 },   // LOD 0: 100ms/px, 1 min
-        { 1.0,    600.0,  600 },   // LOD 1: 1s/px, 10 min
-        { 3.0,    1800.0, 600 },   // LOD 2: 3s/px, 30 min
-        { 12.0,   7200.0, 600 },   // LOD 3: 12s/px, 120 min
-        { 60.0,   18000.0, 300 }   // LOD 4: 60s/px, 300 min (5 hrs)
+        { 0.1,   60.0,    1200, 4 },
+        { 0.5,   300.0,   1200, 4 },
+        { 2.0,   1200.0,  1200, 4 },
+        { 10.0,  7200.0,  1440, 4 },
+        { 30.0,  18000.0, 1200, 4 }
     }};
     
-    struct ImageStrip
+    struct BitmapStrip
     {
         juce::Image image;
-        int currentColumn{0};       // Next column to write
-        double lastRenderedTime{0}; // Timestamp of last rendered data
-        bool needsFullRedraw{true};
+        double lastRenderedTime{0.0};    // Time up to which we've rendered
+        int totalColumnsRendered{0};      // Total columns rendered (for ring buffer)
     };
     
-    std::array<ImageStrip, kNumLodLevels> imageStrips;
-    
-    // Tracking
-    double lastUpdateTime{0.0};
+    std::array<BitmapStrip, kNumLodLevels> bitmapStrips;
     int currentLodLevel{0};
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessHistoryDisplay)
