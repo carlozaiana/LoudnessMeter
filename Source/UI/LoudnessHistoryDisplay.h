@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Storage/LoudnessDataStore.h"
+#include <array>
 
 class LoudnessHistoryDisplay : public juce::Component,
                                 private juce::Timer
@@ -23,43 +24,48 @@ public:
 private:
     void timerCallback() override;
     
+    // Drawing methods
     void drawBackground(juce::Graphics& g);
+    void drawFromImageStrips(juce::Graphics& g);
     void drawGrid(juce::Graphics& g);
-    void drawCurves(juce::Graphics& g);
     void drawCurrentValues(juce::Graphics& g);
     void drawZoomInfo(juce::Graphics& g);
     
-    void rebuildPaths();
+    // Image strip management
+    void initializeImageStrips();
+    void updateImageStrips();
+    void renderColumnToStrip(int lodLevel, int columnIndex, double startTime, double endTime);
+    void downsampleToHigherLODs(int fromColumn);
     
-    float timeToX(double time) const;
-    float loudnessToY(float lufs) const;
+    // Coordinate conversion
+    float lufsToImageY(float lufs) const;
+    int getLodLevelForTimeRange(double timeRange) const;
     
     LoudnessDataStore& dataStore;
     
+    // Fixed Y range for rendering
+    static constexpr float kMinLufs = -90.0f;
+    static constexpr float kMaxLufs = 0.0f;
+    static constexpr float kLufsRange = kMaxLufs - kMinLufs; // 90 dB
+    
     // View state
-    double viewStartTime{-10.0};
-    double viewTimeRange{10.0};
-    float viewMinLufs{-60.0f};
-    float viewMaxLufs{0.0f};
+    double viewTimeRange{10.0};      // Visible time range in seconds
+    float viewMinLufs{-60.0f};       // Current Y view min (for display scaling)
+    float viewMaxLufs{0.0f};         // Current Y view max (for display scaling)
     
     // Zoom limits
     static constexpr double kMinTimeRange = 0.5;
-    static constexpr double kMaxTimeRange = 18000.0;
+    static constexpr double kMaxTimeRange = 18000.0; // 5 hours
     static constexpr float kMinLufsRange = 6.0f;
-    static constexpr float kMaxLufsRange = 80.0f;
+    static constexpr float kMaxLufsRange = 90.0f;
     
-    // Current loudness
+    // Current loudness values
     float currentMomentary{-100.0f};
     float currentShortTerm{-100.0f};
     
     // Mouse interaction
     juce::Point<float> lastMousePos;
     bool isDragging{false};
-    
-    // Zoom state - disable auto-scroll during zoom
-    bool isZooming{false};
-    double zoomCooldownTime{0.0};
-    static constexpr double kZoomCooldownDuration = 0.3; // seconds after zoom before auto-scroll resumes
     
     // Colors
     const juce::Colour backgroundColour = juce::Colour(16, 30, 50);
@@ -68,27 +74,44 @@ private:
     const juce::Colour gridColour = juce::Colour(255, 255, 255).withAlpha(0.15f);
     const juce::Colour textColour = juce::Colour(200, 200, 200);
     
-    // Cached render data
-    LoudnessDataStore::RenderData cachedRenderData;
+    // LOD configuration
+    // LOD 0: 100ms per pixel, max 1 minute (600 px)
+    // LOD 1: 1s per pixel, max 10 minutes (600 px)
+    // LOD 2: 3s per pixel, max 30 minutes (600 px)
+    // LOD 3: 12s per pixel, max 120 minutes (600 px)
+    // LOD 4: 60s per pixel, max 300 minutes (300 px)
     
-    // Cached paths
-    juce::Path momentaryLinePath;
-    juce::Path shortTermLinePath;
-    juce::Path momentaryFillPath;
-    juce::Path shortTermFillPath;
+    static constexpr int kNumLodLevels = 5;
+    static constexpr int kImageHeight = 256; // Fixed height for rendering
     
-    // State tracking
-    double lastViewStartTime{0.0};
-    double lastViewTimeRange{0.0};
-    float lastViewMinLufs{-60.0f};
-    float lastViewMaxLufs{0.0f};
-    int lastWidth{0};
-    int lastHeight{0};
-    double lastDataTime{0.0};
-    bool pathsNeedRebuild{true};
+    struct LodConfig
+    {
+        double secondsPerPixel;
+        double maxTimeRange;
+        int stripWidth;
+    };
     
-    // Time tracking for zoom cooldown
-    double lastTimerTime{0.0};
+    static constexpr std::array<LodConfig, kNumLodLevels> kLodConfigs = {{
+        { 0.1,    60.0,   600 },   // LOD 0: 100ms/px, 1 min
+        { 1.0,    600.0,  600 },   // LOD 1: 1s/px, 10 min
+        { 3.0,    1800.0, 600 },   // LOD 2: 3s/px, 30 min
+        { 12.0,   7200.0, 600 },   // LOD 3: 12s/px, 120 min
+        { 60.0,   18000.0, 300 }   // LOD 4: 60s/px, 300 min (5 hrs)
+    }};
+    
+    struct ImageStrip
+    {
+        juce::Image image;
+        int currentColumn{0};       // Next column to write
+        double lastRenderedTime{0}; // Timestamp of last rendered data
+        bool needsFullRedraw{true};
+    };
+    
+    std::array<ImageStrip, kNumLodLevels> imageStrips;
+    
+    // Tracking
+    double lastUpdateTime{0.0};
+    int currentLodLevel{0};
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LoudnessHistoryDisplay)
 };
