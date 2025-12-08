@@ -22,12 +22,21 @@ public:
         float momentaryMax{-100.0f};
         float shortTermMin{100.0f};
         float shortTermMax{-100.0f};
-        double timeStart{0.0};
-        double timeEnd{0.0};
+        double timeMid{0.0};
         
-        bool isValid() const { return momentaryMax > -100.0f || shortTermMax > -100.0f; }
+        bool hasValidMomentary() const { return momentaryMax > -99.0f; }
+        bool hasValidShortTerm() const { return shortTermMax > -99.0f; }
         
-        void addSample(float m, float s)
+        void reset()
+        {
+            momentaryMin = 100.0f;
+            momentaryMax = -100.0f;
+            shortTermMin = 100.0f;
+            shortTermMax = -100.0f;
+            timeMid = 0.0;
+        }
+        
+        void addSample(float m, float s, double t)
         {
             if (m > -100.0f)
             {
@@ -39,32 +48,47 @@ public:
                 shortTermMin = std::min(shortTermMin, s);
                 shortTermMax = std::max(shortTermMax, s);
             }
+            timeMid = t;
         }
         
         void merge(const MinMaxPoint& other)
         {
-            if (other.momentaryMax > -100.0f)
+            if (other.hasValidMomentary())
             {
-                momentaryMin = std::min(momentaryMin, other.momentaryMin);
-                momentaryMax = std::max(momentaryMax, other.momentaryMax);
+                if (hasValidMomentary())
+                {
+                    momentaryMin = std::min(momentaryMin, other.momentaryMin);
+                    momentaryMax = std::max(momentaryMax, other.momentaryMax);
+                }
+                else
+                {
+                    momentaryMin = other.momentaryMin;
+                    momentaryMax = other.momentaryMax;
+                }
             }
-            if (other.shortTermMax > -100.0f)
+            if (other.hasValidShortTerm())
             {
-                shortTermMin = std::min(shortTermMin, other.shortTermMin);
-                shortTermMax = std::max(shortTermMax, other.shortTermMax);
+                if (hasValidShortTerm())
+                {
+                    shortTermMin = std::min(shortTermMin, other.shortTermMin);
+                    shortTermMax = std::max(shortTermMax, other.shortTermMax);
+                }
+                else
+                {
+                    shortTermMin = other.shortTermMin;
+                    shortTermMax = other.shortTermMax;
+                }
             }
-            timeEnd = std::max(timeEnd, other.timeEnd);
         }
-        
-        void reset(double start, double end)
-        {
-            momentaryMin = 100.0f;
-            momentaryMax = -100.0f;
-            shortTermMin = 100.0f;
-            shortTermMax = -100.0f;
-            timeStart = start;
-            timeEnd = end;
-        }
+    };
+    
+    struct QueryResult
+    {
+        std::vector<MinMaxPoint> points;
+        int lodLevel{0};
+        double bucketDuration{0.1};
+        double queryStartTime{0.0};
+        double queryEndTime{0.0};
     };
 
     LoudnessDataStore();
@@ -78,32 +102,26 @@ public:
     double getCurrentTime() const;
     double getUpdateRate() const { return updateRate; }
     
-    // Get min/max data for a time range, sampled to approximately numBuckets
-    std::vector<MinMaxPoint> getMinMaxForRange(double startTime, double endTime, int numBuckets) const;
+    QueryResult getDataForTimeRange(double startTime, double endTime, int maxPoints) const;
 
 private:
-    void updateLodData(const LoudnessPoint& point);
+    void updateLodLevels(float momentary, float shortTerm, double timestamp);
+    int selectLodLevel(double timeRange, int maxPoints) const;
     
-    static constexpr size_t kMaxRawPoints = 36000; // 1 hour at 10 Hz
+    static constexpr size_t kMaxRawPoints = 180000;
     
     mutable std::mutex dataMutex;
     std::vector<LoudnessPoint> rawData;
     
-    // LOD levels for efficient querying
-    // LOD 0: 100ms (raw data rate)
-    // LOD 1: 400ms (4:1)
-    // LOD 2: 1.6s (16:1)
-    // LOD 3: 6.4s (64:1)
-    // LOD 4: 25.6s (256:1)
-    static constexpr int kNumLods = 5;
-    static constexpr int kLodFactor = 4;
+    static constexpr int kNumLods = 6;
     
     struct LodLevel
     {
-        std::vector<MinMaxPoint> data;
+        std::vector<MinMaxPoint> buckets;
         double bucketDuration{0.1};
+        double currentBucketStart{0.0};
         MinMaxPoint currentBucket;
-        int samplesInBucket{0};
+        int samplesInCurrentBucket{0};
     };
     
     std::array<LodLevel, kNumLods> lodLevels;
@@ -111,6 +129,4 @@ private:
     double updateRate{10.0};
     double sampleInterval{0.1};
     std::atomic<double> currentTimestamp{0.0};
-    
-    int selectLodLevel(double timeRange, int numBuckets) const;
 };
