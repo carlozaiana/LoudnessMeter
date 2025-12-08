@@ -24,7 +24,7 @@ public:
 private:
     void timerCallback() override;
     
-    void updateCachedData();
+    bool updateCachedDataIfNeeded();
     void buildPaths();
     
     void drawBackground(juce::Graphics& g);
@@ -36,25 +36,26 @@ private:
     float timeToX(double time) const;
     float lufsToY(float lufs) const;
     
-    // Catmull-Rom spline helpers
-    void addCatmullRomSpline(juce::Path& path, 
-                              const std::vector<juce::Point<float>>& points,
-                              bool startPath);
+    void buildSmoothPath(juce::Path& path, const std::vector<juce::Point<float>>& points);
+    void buildFillPath(juce::Path& path, 
+                       const std::vector<juce::Point<float>>& topPoints,
+                       const std::vector<juce::Point<float>>& bottomPoints);
     
     LoudnessDataStore& dataStore;
     
     static constexpr double kDisplayDelay = 0.3;
+    static constexpr int kTargetPointsPerWidth = 400; // Target ~400 points regardless of width
     
     // View state
     double viewTimeRange{10.0};
     float viewMinLufs{-60.0f};
     float viewMaxLufs{0.0f};
     
-    // Calculated display times (updated each frame)
+    // Display times
     double displayStartTime{0.0};
     double displayEndTime{0.0};
     
-    // View limits
+    // Limits
     static constexpr double kMinTimeRange = 0.5;
     static constexpr double kMaxTimeRange = 18000.0;
     static constexpr float kMinLufsRange = 6.0f;
@@ -65,19 +66,20 @@ private:
     float currentMomentary{-100.0f};
     float currentShortTerm{-100.0f};
     
-    // Cached data
+    // Cache
     LoudnessDataStore::QueryResult cachedData;
-    double lastQueryStartTime{-1.0};
-    double lastQueryEndTime{-1.0};
-    int lastQueryWidth{0};
-    double lastDataTime{-1.0};
+    double cacheDisplayStart{-999.0};
+    double cacheDisplayEnd{-999.0};
+    double cacheTimeRange{-1.0};
+    int cacheWidth{0};
+    size_t cacheDataSize{0};
     
-    // Cached paths (rebuilt when data or view changes)
+    // Paths
     juce::Path momentaryFillPath;
     juce::Path momentaryLinePath;
     juce::Path shortTermFillPath;
     juce::Path shortTermLinePath;
-    bool pathsValid{false};
+    bool pathsNeedRebuild{true};
     
     // Mouse
     juce::Point<float> lastMousePos;
