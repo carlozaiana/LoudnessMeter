@@ -167,12 +167,8 @@ void LoudnessHistoryDisplay::downsampleToHigherLODs(int fromColumn)
         const auto& prevConfig = kLodConfigs[static_cast<size_t>(lod - 1)];
         const auto& thisConfig = kLodConfigs[static_cast<size_t>(lod)];
         auto& thisStrip = imageStrips[static_cast<size_t>(lod)];
-        auto& prevStrip = imageStrips[static_cast<size_t>(lod - 1)];
         
         // Calculate ratio between LOD levels
-        int columnsPerPixel = static_cast<int>(thisConfig.secondsPerPixel / prevConfig.secondsPerPixel);
-        
-        // Check if we should render a new column at this LOD
         double currentTime = dataStore.getCurrentTime();
         double timeSinceLastRender = currentTime - thisStrip.lastRenderedTime;
         
@@ -259,29 +255,28 @@ void LoudnessHistoryDisplay::drawFromImageStrips(juce::Graphics& g)
     const auto& strip = imageStrips[static_cast<size_t>(currentLodLevel)];
     
     // Calculate which portion of the image strip to draw
-    // We want to show data ending at currentTime, starting at (currentTime - viewTimeRange)
-    double startTime = currentTime - viewTimeRange;
-    
-    // Calculate pixel positions in the strip
     int endColumn = strip.currentColumn;
     int pixelsToShow = static_cast<int>(viewTimeRange / config.secondsPerPixel);
     pixelsToShow = std::min(pixelsToShow, config.stripWidth);
-    int startColumn = endColumn - pixelsToShow;
     
-    // Calculate source and destination rectangles
-    // The strip is a ring buffer, so we may need to draw in two parts
+    if (pixelsToShow <= 0 || endColumn <= 0)
+        return;
+    
+    int startColumn = endColumn - pixelsToShow;
     
     // Calculate Y scaling based on current view range
     float viewRange = viewMaxLufs - viewMinLufs;
-    float yScale = static_cast<float>(height) / (viewRange / kLufsRange * static_cast<float>(kImageHeight));
     
-    // Calculate Y offset in the source image
-    float sourceYStart = (kMaxLufs - viewMaxLufs) / kLufsRange * static_cast<float>(kImageHeight);
-    float sourceYEnd = (kMaxLufs - viewMinLufs) / kLufsRange * static_cast<float>(kImageHeight);
-    float sourceHeight = sourceYEnd - sourceYStart;
+    // Calculate source Y region in the image
+    int sourceYStart = static_cast<int>((kMaxLufs - viewMaxLufs) / kLufsRange * static_cast<float>(kImageHeight));
+    int sourceYEnd = static_cast<int>((kMaxLufs - viewMinLufs) / kLufsRange * static_cast<float>(kImageHeight));
     
-    // Scale factor for X axis
-    float xScale = static_cast<float>(width) / static_cast<float>(pixelsToShow);
+    sourceYStart = juce::jlimit(0, kImageHeight, sourceYStart);
+    sourceYEnd = juce::jlimit(0, kImageHeight, sourceYEnd);
+    
+    int sourceHeight = sourceYEnd - sourceYStart;
+    if (sourceHeight <= 0)
+        return;
     
     // Handle ring buffer wraparound
     if (startColumn < 0)
@@ -289,56 +284,74 @@ void LoudnessHistoryDisplay::drawFromImageStrips(juce::Graphics& g)
         // Need to draw from two parts of the buffer
         int part1Start = (startColumn + config.stripWidth) % config.stripWidth;
         int part1Width = config.stripWidth - part1Start;
-        int part2Width = endColumn;
+        int part2Width = endColumn % config.stripWidth;
         
-        // Destination widths
-        float totalPixels = static_cast<float>(part1Width + part2Width);
-        float part1DestWidth = static_cast<float>(part1Width) / totalPixels * static_cast<float>(width);
-        float part2DestWidth = static_cast<float>(width) - part1DestWidth;
+        if (part2Width < 0) part2Width = 0;
+        
+        int totalPixels = part1Width + part2Width;
+        if (totalPixels <= 0)
+            return;
+        
+        float part1DestWidth = static_cast<float>(part1Width) / static_cast<float>(totalPixels) * static_cast<float>(width);
         
         // Draw part 1 (older data from end of buffer)
-        juce::Rectangle<float> srcRect1(
-            static_cast<float>(part1Start), sourceYStart,
-            static_cast<float>(part1Width), sourceHeight
-        );
-        juce::Rectangle<float> destRect1(
-            0.0f, 0.0f,
-            part1DestWidth, static_cast<float>(height)
-        );
-        g.drawImage(strip.image, destRect1, juce::RectanglePlacement::stretchToFit, false,
-                    srcRect1);
+        if (part1Width > 0)
+        {
+            g.drawImage(strip.image,
+                        0, 0, static_cast<int>(part1DestWidth), height,  // dest
+                        part1Start, sourceYStart, part1Width, sourceHeight);  // source
+        }
         
         // Draw part 2 (newer data from start of buffer)
         if (part2Width > 0)
         {
-            juce::Rectangle<float> srcRect2(
-                0.0f, sourceYStart,
-                static_cast<float>(part2Width), sourceHeight
-            );
-            juce::Rectangle<float> destRect2(
-                part1DestWidth, 0.0f,
-                part2DestWidth, static_cast<float>(height)
-            );
-            g.drawImage(strip.image, destRect2, juce::RectanglePlacement::stretchToFit, false,
-                        srcRect2);
+            g.drawImage(strip.image,
+                        static_cast<int>(part1DestWidth), 0, width - static_cast<int>(part1DestWidth), height,  // dest
+                        0, sourceYStart, part2Width, sourceHeight);  // source
         }
     }
     else
     {
         // Simple case: contiguous region
-        startColumn = startColumn % config.stripWidth;
+        int actualStartColumn = startColumn % config.stripWidth;
+        int actualEndColumn = endColumn % config.stripWidth;
         
-        juce::Rectangle<float> srcRect(
-            static_cast<float>(startColumn), sourceYStart,
-            static_cast<float>(pixelsToShow), sourceHeight
-        );
-        juce::Rectangle<float> destRect(
-            0.0f, 0.0f,
-            static_cast<float>(width), static_cast<float>(height)
-        );
-        
-        g.drawImage(strip.image, destRect, juce::RectanglePlacement::stretchToFit, false,
-                    srcRect);
+        // Handle case where we wrap around
+        if (actualEndColumn <= actualStartColumn && endColumn > startColumn)
+        {
+            // We've wrapped - draw in two parts
+            int part1Width = config.stripWidth - actualStartColumn;
+            int part2Width = actualEndColumn;
+            
+            int totalPixels = part1Width + part2Width;
+            if (totalPixels <= 0)
+                return;
+            
+            float part1DestWidth = static_cast<float>(part1Width) / static_cast<float>(totalPixels) * static_cast<float>(width);
+            
+            // Part 1
+            if (part1Width > 0)
+            {
+                g.drawImage(strip.image,
+                            0, 0, static_cast<int>(part1DestWidth), height,
+                            actualStartColumn, sourceYStart, part1Width, sourceHeight);
+            }
+            
+            // Part 2
+            if (part2Width > 0)
+            {
+                g.drawImage(strip.image,
+                            static_cast<int>(part1DestWidth), 0, width - static_cast<int>(part1DestWidth), height,
+                            0, sourceYStart, part2Width, sourceHeight);
+            }
+        }
+        else
+        {
+            // No wrap - simple draw
+            g.drawImage(strip.image,
+                        0, 0, width, height,  // dest
+                        actualStartColumn, sourceYStart, pixelsToShow, sourceHeight);  // source
+        }
     }
 }
 
@@ -510,9 +523,9 @@ void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
     
     juce::String resStr;
     if (config.secondsPerPixel >= 1.0)
-        resStr = juce::String(config.secondsPerPixel, 0) + "s/px";
+        resStr = juce::String(static_cast<int>(config.secondsPerPixel)) + "s/px";
     else
-        resStr = juce::String(static_cast<int>(config.secondsPerPixel * 1000)) + "ms/px";
+        resStr = juce::String(static_cast<int>(config.secondsPerPixel * 1000.0)) + "ms/px";
     
     juce::String infoStr = "X: " + timeStr + " | Y: " + lufsStr + " | " + 
                            lodStr + " (" + resStr + ")";
