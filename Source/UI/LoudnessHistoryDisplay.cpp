@@ -7,7 +7,7 @@ LoudnessHistoryDisplay::LoudnessHistoryDisplay(LoudnessDataStore& store)
 {
     setOpaque(true);
     initializeBitmaps();
-    startTimerHz(60); // 60 Hz for smooth display
+    startTimerHz(60);
 }
 
 LoudnessHistoryDisplay::~LoudnessHistoryDisplay()
@@ -17,15 +17,14 @@ LoudnessHistoryDisplay::~LoudnessHistoryDisplay()
 
 void LoudnessHistoryDisplay::initializeBitmaps()
 {
-    for (int lod = 0; lod < kNumLodLevels; ++lod)
+    for (int lod = 0; lod < kNumLods; ++lod)
     {
-        const auto& config = kLodConfigs[static_cast<size_t>(lod)];
-        auto& strip = bitmapStrips[static_cast<size_t>(lod)];
+        const auto& cfg = kLodConfigs[static_cast<size_t>(lod)];
+        auto& bmp = lodBitmaps[static_cast<size_t>(lod)];
         
-        strip.image = juce::Image(juce::Image::ARGB, config.imageWidth, kImageHeight, true);
-        strip.image.clear(strip.image.getBounds(), backgroundColour);
-        strip.lastRenderedTime = 0.0;
-        strip.totalColumnsRendered = 0;
+        bmp.image = juce::Image(juce::Image::ARGB, cfg.bitmapWidth, kBitmapHeight, true);
+        bmp.image.clear(bmp.image.getBounds(), bgColour);
+        bmp.renderedUpToTime = 0.0;
     }
 }
 
@@ -37,242 +36,221 @@ void LoudnessHistoryDisplay::timerCallback()
 
 void LoudnessHistoryDisplay::updateBitmaps()
 {
-    double currentDataTime = dataStore.getCurrentTime();
+    double dataTime = dataStore.getCurrentTime();
+    double renderTime = dataTime - kDisplayDelay;
     
-    // We render up to (currentDataTime - delay)
-    // This gives us time to accumulate data for smooth curves
-    double renderUpToTime = currentDataTime - kDisplayDelaySeconds;
-    
-    if (renderUpToTime <= 0.0)
+    if (renderTime <= 0.0)
         return;
     
-    // Update each LOD level
-    for (int lod = 0; lod < kNumLodLevels; ++lod)
+    // Update all LOD levels
+    for (int lod = 0; lod < kNumLods; ++lod)
     {
-        const auto& config = kLodConfigs[static_cast<size_t>(lod)];
-        auto& strip = bitmapStrips[static_cast<size_t>(lod)];
+        const auto& cfg = kLodConfigs[static_cast<size_t>(lod)];
+        auto& bmp = lodBitmaps[static_cast<size_t>(lod)];
         
-        // Calculate how many chunk widths we need to render
-        double chunkDuration = config.secondsPerPixel * config.chunkSizePixels;
+        // Render in chunks of 4 pixels
+        double chunkDuration = cfg.secondsPerPixel * 4.0;
         
-        while (strip.lastRenderedTime + chunkDuration <= renderUpToTime)
+        while (bmp.renderedUpToTime + chunkDuration <= renderTime)
         {
-            double chunkStartTime = strip.lastRenderedTime;
-            double chunkEndTime = chunkStartTime + chunkDuration;
+            double chunkStart = bmp.renderedUpToTime;
+            double chunkEnd = chunkStart + chunkDuration;
             
-            // Clear the region we're about to draw
-            int startCol = strip.totalColumnsRendered % config.imageWidth;
-            clearBitmapRegion(lod, startCol, config.chunkSizePixels);
+            renderChunkToBitmap(lod, chunkStart, chunkEnd);
             
-            // Render the curve chunk
-            renderCurveChunkToBitmap(lod, chunkStartTime, chunkEndTime);
-            
-            strip.lastRenderedTime = chunkEndTime;
-            strip.totalColumnsRendered += config.chunkSizePixels;
+            bmp.renderedUpToTime = chunkEnd;
         }
     }
 }
 
-void LoudnessHistoryDisplay::clearBitmapRegion(int lodLevel, int startColumn, int numColumns)
+void LoudnessHistoryDisplay::renderChunkToBitmap(int lodLevel, double startTime, double endTime)
 {
-    const auto& config = kLodConfigs[static_cast<size_t>(lodLevel)];
-    auto& strip = bitmapStrips[static_cast<size_t>(lodLevel)];
+    const auto& cfg = kLodConfigs[static_cast<size_t>(lodLevel)];
+    auto& bmp = lodBitmaps[static_cast<size_t>(lodLevel)];
     
-    juce::Graphics g(strip.image);
-    g.setColour(backgroundColour);
-    
-    // Handle wrap-around
-    if (startColumn + numColumns <= config.imageWidth)
-    {
-        g.fillRect(startColumn, 0, numColumns, kImageHeight);
-    }
-    else
-    {
-        int firstPart = config.imageWidth - startColumn;
-        int secondPart = numColumns - firstPart;
-        g.fillRect(startColumn, 0, firstPart, kImageHeight);
-        g.fillRect(0, 0, secondPart, kImageHeight);
-    }
-}
-
-void LoudnessHistoryDisplay::renderCurveChunkToBitmap(int lodLevel, double chunkStartTime, double chunkEndTime)
-{
-    const auto& config = kLodConfigs[static_cast<size_t>(lodLevel)];
-    auto& strip = bitmapStrips[static_cast<size_t>(lodLevel)];
-    
-    // Get data points for this time range (with some overlap for curve continuity)
-    double overlapTime = config.secondsPerPixel * 2;
-    auto points = dataStore.getPointsInRange(chunkStartTime - overlapTime, chunkEndTime + overlapTime);
+    // Get data with overlap for smooth curves
+    double overlap = cfg.secondsPerPixel * 2.0;
+    auto points = dataStore.getPointsInRange(startTime - overlap, endTime + overlap);
     
     if (points.empty())
         return;
     
-    juce::Graphics g(strip.image);
+    juce::Graphics g(bmp.image);
     
-    // Group points by pixel column and find min/max
-    struct ColumnData
+    // Calculate pixel range for this chunk
+    int startPixel = static_cast<int>(startTime / cfg.secondsPerPixel);
+    int endPixel = static_cast<int>(endTime / cfg.secondsPerPixel);
+    int numPixels = endPixel - startPixel;
+    
+    if (numPixels <= 0)
+        return;
+    
+    // Clear the chunk region (with wrap-around)
+    g.setColour(bgColour);
+    for (int i = 0; i < numPixels; ++i)
     {
-        float momentaryMin{100.0f}, momentaryMax{-100.0f};
-        float shortTermMin{100.0f}, shortTermMax{-100.0f};
-        bool hasData{false};
+        int col = (startPixel + i) % cfg.bitmapWidth;
+        g.fillRect(col, 0, 1, kBitmapHeight);
+    }
+    
+    // Build min/max data per pixel column
+    struct PixelData
+    {
+        float mMin{100.0f}, mMax{-100.0f};
+        float sMin{100.0f}, sMax{-100.0f};
+        bool valid{false};
     };
     
-    // We need data for the chunk plus overlap for curve continuity
-    int numColumnsTotal = config.chunkSizePixels + 4; // Extra for overlap
-    std::vector<ColumnData> columns(static_cast<size_t>(numColumnsTotal));
+    std::vector<PixelData> pixelData(static_cast<size_t>(numPixels + 4)); // +4 for overlap
     
-    double pixelStartTime = chunkStartTime - config.secondsPerPixel * 2;
+    int dataStartPixel = startPixel - 2;
     
-    for (const auto& point : points)
+    for (const auto& pt : points)
     {
-        int col = static_cast<int>((point.timestamp - pixelStartTime) / config.secondsPerPixel);
+        int pixelIdx = static_cast<int>(pt.timestamp / cfg.secondsPerPixel) - dataStartPixel;
         
-        if (col >= 0 && col < numColumnsTotal)
+        if (pixelIdx >= 0 && pixelIdx < static_cast<int>(pixelData.size()))
         {
-            auto& cd = columns[static_cast<size_t>(col)];
+            auto& pd = pixelData[static_cast<size_t>(pixelIdx)];
             
-            if (point.momentary > -100.0f)
+            if (pt.momentary > -100.0f)
             {
-                cd.momentaryMin = std::min(cd.momentaryMin, point.momentary);
-                cd.momentaryMax = std::max(cd.momentaryMax, point.momentary);
-                cd.hasData = true;
+                pd.mMin = std::min(pd.mMin, pt.momentary);
+                pd.mMax = std::max(pd.mMax, pt.momentary);
+                pd.valid = true;
             }
-            if (point.shortTerm > -100.0f)
+            if (pt.shortTerm > -100.0f)
             {
-                cd.shortTermMin = std::min(cd.shortTermMin, point.shortTerm);
-                cd.shortTermMax = std::max(cd.shortTermMax, point.shortTerm);
-                cd.hasData = true;
+                pd.sMin = std::min(pd.sMin, pt.shortTerm);
+                pd.sMax = std::max(pd.sMax, pt.shortTerm);
+                pd.valid = true;
             }
         }
     }
     
-    // Build paths for the curves
-    // We draw onto the bitmap at the correct column positions
+    // Build curve paths
+    juce::Path mFillPath, mLinePath;
+    juce::Path sFillPath, sLinePath;
     
-    int baseColumn = strip.totalColumnsRendered % config.imageWidth;
+    std::vector<juce::Point<float>> mTopPts, mBotPts;
+    std::vector<juce::Point<float>> sTopPts, sBotPts;
     
-    // Momentary fill path
-    juce::Path momentaryFill;
-    juce::Path momentaryLine;
-    juce::Path shortTermFill;
-    juce::Path shortTermLine;
-    
-    std::vector<juce::Point<float>> momentaryTopPts;
-    std::vector<juce::Point<float>> momentaryBotPts;
-    std::vector<juce::Point<float>> shortTermTopPts;
-    std::vector<juce::Point<float>> shortTermBotPts;
-    
-    // Collect points for the chunk we're rendering (skip overlap at start)
-    for (int i = 2; i < 2 + config.chunkSizePixels; ++i)
+    for (int i = 0; i < numPixels; ++i)
     {
-        const auto& cd = columns[static_cast<size_t>(i)];
+        int dataIdx = i + 2; // Skip overlap at start
+        if (dataIdx >= static_cast<int>(pixelData.size()))
+            break;
         
-        if (!cd.hasData)
+        const auto& pd = pixelData[static_cast<size_t>(dataIdx)];
+        if (!pd.valid)
             continue;
         
-        int imgCol = (baseColumn + i - 2) % config.imageWidth;
-        float x = static_cast<float>(imgCol);
+        int col = (startPixel + i) % cfg.bitmapWidth;
+        float x = static_cast<float>(col);
         
-        if (cd.momentaryMax > -100.0f)
+        // Momentary
+        if (pd.mMax > -100.0f)
         {
-            float yTop = lufsToImageY(cd.momentaryMax);
-            float yBot = lufsToImageY(cd.momentaryMin);
+            float yTop = lufsToNormalizedY(pd.mMax) * kBitmapHeight;
+            float yBot = lufsToNormalizedY(pd.mMin) * kBitmapHeight;
             float yMid = (yTop + yBot) * 0.5f;
             
-            momentaryTopPts.push_back({x, yTop});
-            momentaryBotPts.push_back({x, yBot});
+            yTop = juce::jlimit(0.0f, static_cast<float>(kBitmapHeight - 1), yTop);
+            yBot = juce::jlimit(0.0f, static_cast<float>(kBitmapHeight - 1), yBot);
+            yMid = juce::jlimit(0.0f, static_cast<float>(kBitmapHeight - 1), yMid);
             
-            if (momentaryLine.isEmpty())
-                momentaryLine.startNewSubPath(x, yMid);
+            mTopPts.push_back({x, yTop});
+            mBotPts.push_back({x, yBot});
+            
+            if (mLinePath.isEmpty())
+                mLinePath.startNewSubPath(x, yMid);
             else
-                momentaryLine.lineTo(x, yMid);
+                mLinePath.lineTo(x, yMid);
         }
         
-        if (cd.shortTermMax > -100.0f)
+        // Short-term
+        if (pd.sMax > -100.0f)
         {
-            float yTop = lufsToImageY(cd.shortTermMax);
-            float yBot = lufsToImageY(cd.shortTermMin);
+            float yTop = lufsToNormalizedY(pd.sMax) * kBitmapHeight;
+            float yBot = lufsToNormalizedY(pd.sMin) * kBitmapHeight;
             float yMid = (yTop + yBot) * 0.5f;
             
-            shortTermTopPts.push_back({x, yTop});
-            shortTermBotPts.push_back({x, yBot});
+            yTop = juce::jlimit(0.0f, static_cast<float>(kBitmapHeight - 1), yTop);
+            yBot = juce::jlimit(0.0f, static_cast<float>(kBitmapHeight - 1), yBot);
+            yMid = juce::jlimit(0.0f, static_cast<float>(kBitmapHeight - 1), yMid);
             
-            if (shortTermLine.isEmpty())
-                shortTermLine.startNewSubPath(x, yMid);
+            sTopPts.push_back({x, yTop});
+            sBotPts.push_back({x, yBot});
+            
+            if (sLinePath.isEmpty())
+                sLinePath.startNewSubPath(x, yMid);
             else
-                shortTermLine.lineTo(x, yMid);
+                sLinePath.lineTo(x, yMid);
         }
     }
     
-    // Build fill paths
-    if (momentaryTopPts.size() >= 2)
+    // Create fill paths
+    if (mTopPts.size() >= 2)
     {
-        momentaryFill.startNewSubPath(momentaryTopPts[0]);
-        for (size_t i = 1; i < momentaryTopPts.size(); ++i)
-            momentaryFill.lineTo(momentaryTopPts[i]);
-        for (auto it = momentaryBotPts.rbegin(); it != momentaryBotPts.rend(); ++it)
-            momentaryFill.lineTo(*it);
-        momentaryFill.closeSubPath();
+        mFillPath.startNewSubPath(mTopPts[0]);
+        for (size_t i = 1; i < mTopPts.size(); ++i)
+            mFillPath.lineTo(mTopPts[i]);
+        for (auto it = mBotPts.rbegin(); it != mBotPts.rend(); ++it)
+            mFillPath.lineTo(*it);
+        mFillPath.closeSubPath();
     }
     
-    if (shortTermTopPts.size() >= 2)
+    if (sTopPts.size() >= 2)
     {
-        shortTermFill.startNewSubPath(shortTermTopPts[0]);
-        for (size_t i = 1; i < shortTermTopPts.size(); ++i)
-            shortTermFill.lineTo(shortTermTopPts[i]);
-        for (auto it = shortTermBotPts.rbegin(); it != shortTermBotPts.rend(); ++it)
-            shortTermFill.lineTo(*it);
-        shortTermFill.closeSubPath();
+        sFillPath.startNewSubPath(sTopPts[0]);
+        for (size_t i = 1; i < sTopPts.size(); ++i)
+            sFillPath.lineTo(sTopPts[i]);
+        for (auto it = sBotPts.rbegin(); it != sBotPts.rend(); ++it)
+            sFillPath.lineTo(*it);
+        sFillPath.closeSubPath();
     }
     
-    // Draw momentary (behind)
-    if (!momentaryFill.isEmpty())
+    // Draw momentary (behind) - use full colors, not faint
+    if (!mFillPath.isEmpty())
     {
-        g.setColour(momentaryColour.withAlpha(0.35f));
-        g.fillPath(momentaryFill);
+        g.setColour(momentaryColour.withAlpha(0.5f));
+        g.fillPath(mFillPath);
     }
-    if (!momentaryLine.isEmpty())
+    if (!mLinePath.isEmpty())
     {
         g.setColour(momentaryColour);
-        g.strokePath(momentaryLine, juce::PathStrokeType(1.2f,
+        g.strokePath(mLinePath, juce::PathStrokeType(1.5f,
             juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
     
     // Draw short-term (on top)
-    if (!shortTermFill.isEmpty())
+    if (!sFillPath.isEmpty())
     {
-        g.setColour(shortTermColour.withAlpha(0.45f));
-        g.fillPath(shortTermFill);
+        g.setColour(shortTermColour.withAlpha(0.6f));
+        g.fillPath(sFillPath);
     }
-    if (!shortTermLine.isEmpty())
+    if (!sLinePath.isEmpty())
     {
         g.setColour(shortTermColour);
-        g.strokePath(shortTermLine, juce::PathStrokeType(1.5f,
+        g.strokePath(sLinePath, juce::PathStrokeType(2.0f,
             juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 }
 
-float LoudnessHistoryDisplay::lufsToImageY(float lufs) const
+float LoudnessHistoryDisplay::lufsToNormalizedY(float lufs) const
 {
-    float normalized = (kMaxLufs - lufs) / kLufsRange;
-    return juce::jlimit(0.0f, static_cast<float>(kImageHeight - 1), 
-                        normalized * static_cast<float>(kImageHeight));
+    // Map LUFS to 0..1 where 0 = top (max LUFS), 1 = bottom (min LUFS)
+    return (kImageMaxLufs - lufs) / kImageLufsRange;
 }
 
-int LoudnessHistoryDisplay::timeToColumn(double time, int lodLevel) const
+int LoudnessHistoryDisplay::getLodForTimeRange(double timeRange) const
 {
-    const auto& config = kLodConfigs[static_cast<size_t>(lodLevel)];
-    return static_cast<int>(time / config.secondsPerPixel);
-}
-
-int LoudnessHistoryDisplay::getLodLevelForTimeRange(double timeRange) const
-{
-    for (int lod = 0; lod < kNumLodLevels; ++lod)
+    for (int lod = 0; lod < kNumLods; ++lod)
     {
         if (timeRange <= kLodConfigs[static_cast<size_t>(lod)].maxTimeRange)
             return lod;
     }
-    return kNumLodLevels - 1;
+    return kNumLods - 1;
 }
 
 void LoudnessHistoryDisplay::setCurrentLoudness(float momentary, float shortTerm)
@@ -284,7 +262,7 @@ void LoudnessHistoryDisplay::setCurrentLoudness(float momentary, float shortTerm
 void LoudnessHistoryDisplay::paint(juce::Graphics& g)
 {
     drawBackground(g);
-    drawFromBitmap(g);
+    drawBitmapToScreen(g);
     drawGrid(g);
     drawCurrentValues(g);
     drawZoomInfo(g);
@@ -292,132 +270,152 @@ void LoudnessHistoryDisplay::paint(juce::Graphics& g)
 
 void LoudnessHistoryDisplay::drawBackground(juce::Graphics& g)
 {
-    g.fillAll(backgroundColour);
+    g.fillAll(bgColour);
 }
 
-void LoudnessHistoryDisplay::drawFromBitmap(juce::Graphics& g)
+void LoudnessHistoryDisplay::drawBitmapToScreen(juce::Graphics& g)
 {
-    int displayWidth = getWidth();
-    int displayHeight = getHeight();
+    int w = getWidth();
+    int h = getHeight();
     
-    if (displayWidth <= 0 || displayHeight <= 0)
+    if (w <= 0 || h <= 0)
         return;
     
-    double currentDataTime = dataStore.getCurrentTime();
-    double displayTime = currentDataTime - kDisplayDelaySeconds;
+    double dataTime = dataStore.getCurrentTime();
+    double displayEndTime = dataTime - kDisplayDelay;
     
-    if (displayTime <= 0.0)
+    if (displayEndTime <= 0.0)
         return;
     
-    // Select LOD level based on zoom
-    currentLodLevel = getLodLevelForTimeRange(viewTimeRange);
-    const auto& config = kLodConfigs[static_cast<size_t>(currentLodLevel)];
-    const auto& strip = bitmapStrips[static_cast<size_t>(currentLodLevel)];
-    
-    // Calculate the display window
-    double displayEndTime = displayTime;
     double displayStartTime = displayEndTime - viewTimeRange;
+    if (displayStartTime < 0.0)
+        displayStartTime = 0.0;
     
-    // Convert to pixel positions in the bitmap
-    double endPixelExact = displayEndTime / config.secondsPerPixel;
-    double startPixelExact = displayStartTime / config.secondsPerPixel;
+    // Select LOD
+    activeLod = getLodForTimeRange(viewTimeRange);
+    const auto& cfg = kLodConfigs[static_cast<size_t>(activeLod)];
+    const auto& bmp = lodBitmaps[static_cast<size_t>(activeLod)];
     
-    // Sub-pixel offset for smooth scrolling
-    float subPixelOffset = static_cast<float>(endPixelExact - std::floor(endPixelExact));
+    // Calculate source pixel range
+    double startPixelExact = displayStartTime / cfg.secondsPerPixel;
+    double endPixelExact = displayEndTime / cfg.secondsPerPixel;
     
-    int endPixel = static_cast<int>(std::floor(endPixelExact));
     int startPixel = static_cast<int>(std::floor(startPixelExact));
-    int numPixels = endPixel - startPixel + 1;
+    int endPixel = static_cast<int>(std::ceil(endPixelExact));
+    int numPixels = endPixel - startPixel;
     
     if (numPixels <= 0)
         return;
     
-    // Calculate source region in the ring buffer bitmap
-    int srcEndCol = endPixel % config.imageWidth;
-    int srcStartCol = startPixel % config.imageWidth;
+    // Sub-pixel offset for smooth scrolling (0 to 1)
+    float subPixelOffset = static_cast<float>(startPixelExact - std::floor(startPixelExact));
     
-    // Calculate Y region based on view
-    float srcYTop = (kMaxLufs - viewMaxLufs) / kLufsRange * static_cast<float>(kImageHeight);
-    float srcYBot = (kMaxLufs - viewMinLufs) / kLufsRange * static_cast<float>(kImageHeight);
+    // Calculate source Y region based on view LUFS range
+    float srcYTopNorm = (kImageMaxLufs - viewMaxLufs) / kImageLufsRange;
+    float srcYBotNorm = (kImageMaxLufs - viewMinLufs) / kImageLufsRange;
     
-    srcYTop = juce::jlimit(0.0f, static_cast<float>(kImageHeight), srcYTop);
-    srcYBot = juce::jlimit(0.0f, static_cast<float>(kImageHeight), srcYBot);
+    int srcY = static_cast<int>(srcYTopNorm * kBitmapHeight);
+    int srcH = static_cast<int>((srcYBotNorm - srcYTopNorm) * kBitmapHeight);
     
-    int srcY = static_cast<int>(srcYTop);
-    int srcH = static_cast<int>(srcYBot - srcYTop);
+    srcY = juce::jlimit(0, kBitmapHeight - 1, srcY);
+    srcH = juce::jlimit(1, kBitmapHeight - srcY, srcH);
     
-    if (srcH <= 0)
-        return;
+    // Scale factor from bitmap pixels to screen pixels
+    float scaleX = static_cast<float>(w) / static_cast<float>(numPixels);
     
-    // Apply sub-pixel offset for smooth scrolling
-    float destOffsetX = -subPixelOffset * (static_cast<float>(displayWidth) / static_cast<float>(numPixels));
+    // Apply sub-pixel offset
+    float offsetX = -subPixelOffset * scaleX;
     
     // Handle ring buffer wrap-around
-    if (srcStartCol <= srcEndCol)
+    int srcStartCol = startPixel % cfg.bitmapWidth;
+    if (srcStartCol < 0)
+        srcStartCol += cfg.bitmapWidth;
+    
+    int srcEndCol = endPixel % cfg.bitmapWidth;
+    if (srcEndCol < 0)
+        srcEndCol += cfg.bitmapWidth;
+    
+    // Check if we need to draw in two parts (wrap-around)
+    if (srcStartCol < srcEndCol && numPixels <= (srcEndCol - srcStartCol + 1))
     {
-        // Simple case: contiguous region
-        int srcW = srcEndCol - srcStartCol + 1;
+        // Simple case: no wrap
+        int srcW = numPixels;
         
-        g.drawImage(strip.image,
-                    static_cast<int>(destOffsetX), 0, 
-                    displayWidth + static_cast<int>(std::abs(destOffsetX)) + 1, displayHeight,
+        g.drawImage(bmp.image,
+                    static_cast<int>(offsetX), 0, w + static_cast<int>(-offsetX) + 2, h,
                     srcStartCol, srcY, srcW, srcH);
     }
     else
     {
-        // Wrapped case: need to draw two parts
-        int part1Width = config.imageWidth - srcStartCol;
-        int part2Width = srcEndCol + 1;
-        int totalWidth = part1Width + part2Width;
+        // Wrapped: draw two parts
+        int part1SrcW = cfg.bitmapWidth - srcStartCol;
+        int part2SrcW = numPixels - part1SrcW;
         
-        float scale = static_cast<float>(displayWidth) / static_cast<float>(totalWidth);
-        int destPart1Width = static_cast<int>(part1Width * scale);
-        int destPart2Width = displayWidth - destPart1Width;
+        if (part2SrcW < 0)
+        {
+            part1SrcW = numPixels;
+            part2SrcW = 0;
+        }
         
-        // Part 1 (end of ring buffer)
-        g.drawImage(strip.image,
-                    static_cast<int>(destOffsetX), 0, destPart1Width, displayHeight,
-                    srcStartCol, srcY, part1Width, srcH);
+        float part1DestW = part1SrcW * scaleX;
+        float part2DestW = part2SrcW * scaleX;
         
-        // Part 2 (start of ring buffer)
-        g.drawImage(strip.image,
-                    static_cast<int>(destOffsetX) + destPart1Width, 0, destPart2Width, displayHeight,
-                    0, srcY, part2Width, srcH);
+        // Part 1
+        if (part1SrcW > 0)
+        {
+            g.drawImage(bmp.image,
+                        static_cast<int>(offsetX), 0, 
+                        static_cast<int>(part1DestW) + 1, h,
+                        srcStartCol, srcY, part1SrcW, srcH);
+        }
+        
+        // Part 2
+        if (part2SrcW > 0)
+        {
+            g.drawImage(bmp.image,
+                        static_cast<int>(offsetX + part1DestW), 0,
+                        static_cast<int>(part2DestW) + 1, h,
+                        0, srcY, part2SrcW, srcH);
+        }
     }
 }
 
 void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
 {
-    int width = getWidth();
-    int height = getHeight();
+    int w = getWidth();
+    int h = getHeight();
     
-    double currentDataTime = dataStore.getCurrentTime();
-    double displayTime = currentDataTime - kDisplayDelaySeconds;
-    double displayStartTime = displayTime - viewTimeRange;
+    double dataTime = dataStore.getCurrentTime();
+    double displayEndTime = dataTime - kDisplayDelay;
+    double displayStartTime = displayEndTime - viewTimeRange;
     
-    // Horizontal grid lines (LUFS)
+    if (displayStartTime < 0.0)
+        displayStartTime = 0.0;
+    
     float lufsRange = viewMaxLufs - viewMinLufs;
+    
+    // Horizontal lines (LUFS)
     float gridStep = 6.0f;
     if (lufsRange > 40.0f) gridStep = 12.0f;
     if (lufsRange < 20.0f) gridStep = 3.0f;
     
-    float startLufs = std::ceil(viewMinLufs / gridStep) * gridStep;
-    
     g.setFont(10.0f);
+    
+    float startLufs = std::ceil(viewMinLufs / gridStep) * gridStep;
     for (float lufs = startLufs; lufs <= viewMaxLufs; lufs += gridStep)
     {
         float normY = (viewMaxLufs - lufs) / lufsRange;
-        int y = static_cast<int>(normY * height);
+        int y = static_cast<int>(normY * h);
         
         g.setColour(gridColour);
-        g.drawHorizontalLine(y, 0.0f, static_cast<float>(width));
+        g.drawHorizontalLine(y, 0.0f, static_cast<float>(w));
         
         g.setColour(textColour.withAlpha(0.7f));
         g.drawText(juce::String(static_cast<int>(lufs)) + " LUFS",
                    5, y - 12, 60, 12, juce::Justification::left);
     }
     
-    // Vertical grid lines (time)
+    // Vertical lines (time)
     double timeStep = 1.0;
     if (viewTimeRange > 30.0) timeStep = 5.0;
     if (viewTimeRange > 60.0) timeStep = 10.0;
@@ -428,35 +426,37 @@ void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
     if (viewTimeRange < 5.0) timeStep = 0.5;
     if (viewTimeRange < 2.0) timeStep = 0.25;
     
-    double gridStartTime = std::floor(displayStartTime / timeStep) * timeStep;
+    double gridStart = std::floor(displayStartTime / timeStep) * timeStep;
     
-    for (double t = gridStartTime; t <= displayTime + timeStep; t += timeStep)
+    for (double t = gridStart; t <= displayEndTime + timeStep; t += timeStep)
     {
-        if (t < displayStartTime) continue;
+        if (t < displayStartTime)
+            continue;
         
         float normX = static_cast<float>((t - displayStartTime) / viewTimeRange);
-        int x = static_cast<int>(normX * width);
+        int x = static_cast<int>(normX * w);
         
-        if (x < 0 || x > width) continue;
+        if (x < 0 || x > w)
+            continue;
         
         g.setColour(gridColour);
-        g.drawVerticalLine(x, 0.0f, static_cast<float>(height));
+        g.drawVerticalLine(x, 0.0f, static_cast<float>(h));
         
         g.setColour(textColour.withAlpha(0.7f));
         
         juce::String label;
         if (t >= 3600.0)
         {
-            int h = static_cast<int>(t) / 3600;
-            int m = (static_cast<int>(t) % 3600) / 60;
-            int s = static_cast<int>(t) % 60;
-            label = juce::String::formatted("%d:%02d:%02d", h, m, s);
+            int hrs = static_cast<int>(t) / 3600;
+            int mins = (static_cast<int>(t) % 3600) / 60;
+            int secs = static_cast<int>(t) % 60;
+            label = juce::String::formatted("%d:%02d:%02d", hrs, mins, secs);
         }
         else if (t >= 60.0)
         {
-            int m = static_cast<int>(t) / 60;
-            int s = static_cast<int>(t) % 60;
-            label = juce::String::formatted("%d:%02d", m, s);
+            int mins = static_cast<int>(t) / 60;
+            int secs = static_cast<int>(t) % 60;
+            label = juce::String::formatted("%d:%02d", mins, secs);
         }
         else if (timeStep >= 1.0)
         {
@@ -467,39 +467,37 @@ void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
             label = juce::String(t, 1) + "s";
         }
         
-        g.drawText(label, x - 30, height - 15, 60, 12, juce::Justification::centred);
+        g.drawText(label, x - 30, h - 15, 60, 12, juce::Justification::centred);
     }
 }
 
 void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
 {
-    int boxWidth = 120;
-    int boxHeight = 40;
-    int margin = 10;
+    int boxW = 120, boxH = 40, margin = 10;
     
-    // Momentary box
-    juce::Rectangle<int> mBox(margin, margin, boxWidth, boxHeight);
+    // Momentary
+    juce::Rectangle<int> mBox(margin, margin, boxW, boxH);
     g.setColour(momentaryColour.withAlpha(0.85f));
     g.fillRoundedRectangle(mBox.toFloat(), 5.0f);
     g.setColour(juce::Colours::white);
     g.setFont(10.0f);
     g.drawText("Momentary", mBox.removeFromTop(14).reduced(5, 0), juce::Justification::left);
     g.setFont(18.0f);
-    juce::String mStr = currentMomentary > -100.0f 
-        ? juce::String(currentMomentary, 1) + " LUFS" 
+    juce::String mStr = currentMomentary > -100.0f
+        ? juce::String(currentMomentary, 1) + " LUFS"
         : "-inf LUFS";
     g.drawText(mStr, mBox.reduced(5, 0), juce::Justification::left);
     
-    // Short-term box
-    juce::Rectangle<int> sBox(margin + boxWidth + margin, margin, boxWidth, boxHeight);
+    // Short-term
+    juce::Rectangle<int> sBox(margin + boxW + margin, margin, boxW, boxH);
     g.setColour(shortTermColour.withAlpha(0.85f));
     g.fillRoundedRectangle(sBox.toFloat(), 5.0f);
     g.setColour(juce::Colours::white);
     g.setFont(10.0f);
     g.drawText("Short-term", sBox.removeFromTop(14).reduced(5, 0), juce::Justification::left);
     g.setFont(18.0f);
-    juce::String sStr = currentShortTerm > -100.0f 
-        ? juce::String(currentShortTerm, 1) + " LUFS" 
+    juce::String sStr = currentShortTerm > -100.0f
+        ? juce::String(currentShortTerm, 1) + " LUFS"
         : "-inf LUFS";
     g.drawText(sStr, sBox.reduced(5, 0), juce::Justification::left);
     
@@ -520,7 +518,7 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
 
 void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
 {
-    auto bounds = getLocalBounds();
+    int w = getWidth();
     
     juce::String timeStr;
     if (viewTimeRange >= 3600.0)
@@ -533,25 +531,23 @@ void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
     float lufsRange = viewMaxLufs - viewMinLufs;
     juce::String lufsStr = juce::String(static_cast<int>(lufsRange)) + " dB";
     
-    juce::String lodStr = "LOD " + juce::String(currentLodLevel);
+    const auto& cfg = kLodConfigs[static_cast<size_t>(activeLod)];
+    juce::String lodStr = "LOD " + juce::String(activeLod);
+    juce::String resStr = cfg.secondsPerPixel >= 1.0
+        ? juce::String(static_cast<int>(cfg.secondsPerPixel)) + "s/px"
+        : juce::String(static_cast<int>(cfg.secondsPerPixel * 1000.0)) + "ms/px";
     
-    const auto& config = kLodConfigs[static_cast<size_t>(currentLodLevel)];
-    juce::String resStr;
-    if (config.secondsPerPixel >= 1.0)
-        resStr = juce::String(static_cast<int>(config.secondsPerPixel)) + "s/px";
-    else
-        resStr = juce::String(static_cast<int>(config.secondsPerPixel * 1000.0)) + "ms/px";
-    
-    juce::String info = "X: " + timeStr + " | Y: " + lufsStr + " | " + lodStr + " (" + resStr + ")";
+    juce::String info = "X: " + timeStr + " | Y: " + lufsStr + 
+                        " | " + lodStr + " (" + resStr + ")";
     
     g.setFont(10.0f);
     g.setColour(textColour.withAlpha(0.6f));
-    g.drawText(info, bounds.getWidth() - 360, 10, 350, 14, juce::Justification::right);
+    g.drawText(info, w - 360, 10, 350, 14, juce::Justification::right);
 }
 
 void LoudnessHistoryDisplay::resized()
 {
-    // Bitmap resolution stays fixed; display just scales
+    // Bitmaps stay fixed size; display scaling handled in drawBitmapToScreen
 }
 
 void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
@@ -572,8 +568,16 @@ void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
         viewMaxLufs = mouseLufs + mouseRatio * newRange;
         viewMinLufs = viewMaxLufs - newRange;
         
-        if (viewMaxLufs > 0.0f) { viewMaxLufs = 0.0f; viewMinLufs = -newRange; }
-        if (viewMinLufs < kMinLufs) { viewMinLufs = kMinLufs; viewMaxLufs = kMinLufs + newRange; }
+        if (viewMaxLufs > 0.0f)
+        {
+            viewMaxLufs = 0.0f;
+            viewMinLufs = -newRange;
+        }
+        if (viewMinLufs < kImageMinLufs)
+        {
+            viewMinLufs = kImageMinLufs;
+            viewMaxLufs = kImageMinLufs + newRange;
+        }
     }
     else
     {
@@ -600,16 +604,21 @@ void LoudnessHistoryDisplay::mouseDrag(const juce::MouseEvent& event)
     lastMousePos = event.position;
     
     float lufsRange = viewMaxLufs - viewMinLufs;
-    float lufsDelta = dy * lufsRange / static_cast<float>(getHeight());
+    float delta = dy * lufsRange / static_cast<float>(getHeight());
     
-    float newMin = viewMinLufs + lufsDelta;
-    float newMax = viewMaxLufs + lufsDelta;
+    viewMinLufs += delta;
+    viewMaxLufs += delta;
     
-    if (newMax > 0.0f) { newMax = 0.0f; newMin = -lufsRange; }
-    if (newMin < kMinLufs) { newMin = kMinLufs; newMax = kMinLufs + lufsRange; }
-    
-    viewMinLufs = newMin;
-    viewMaxLufs = newMax;
+    if (viewMaxLufs > 0.0f)
+    {
+        viewMaxLufs = 0.0f;
+        viewMinLufs = -lufsRange;
+    }
+    if (viewMinLufs < kImageMinLufs)
+    {
+        viewMinLufs = kImageMinLufs;
+        viewMaxLufs = kImageMinLufs + lufsRange;
+    }
     
     repaint();
 }
