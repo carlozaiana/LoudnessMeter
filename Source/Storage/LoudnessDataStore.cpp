@@ -4,8 +4,7 @@
 
 LoudnessDataStore::LoudnessDataStore()
 {
-    // Initialize LOD levels with exponentially increasing bucket durations
-    double duration = 0.1; // 100ms base
+    double duration = 0.1;
     for (int i = 0; i < kNumLods; ++i)
     {
         lodLevels[static_cast<size_t>(i)].bucketDuration = duration;
@@ -13,7 +12,7 @@ LoudnessDataStore::LoudnessDataStore()
         lodLevels[static_cast<size_t>(i)].currentBucket.reset();
         lodLevels[static_cast<size_t>(i)].currentBucketStart = -1.0;
         lodLevels[static_cast<size_t>(i)].samplesInCurrentBucket = 0;
-        duration *= 4.0; // Each level is 4x coarser
+        duration *= 4.0;
     }
 }
 
@@ -26,6 +25,8 @@ void LoudnessDataStore::prepare(double updateRateHz)
 void LoudnessDataStore::reset()
 {
     std::lock_guard<std::mutex> lock(dataMutex);
+    
+    totalSampleCount = 0;
     
     double duration = sampleInterval;
     for (int i = 0; i < kNumLods; ++i)
@@ -46,15 +47,8 @@ void LoudnessDataStore::addPoint(float momentary, float shortTerm)
 {
     std::lock_guard<std::mutex> lock(dataMutex);
     
-    size_t totalSamples = 0;
-    if (!lodLevels[0].buckets.empty() || lodLevels[0].samplesInCurrentBucket > 0)
-    {
-        totalSamples = lodLevels[0].buckets.size() * 
-            static_cast<size_t>(lodLevels[0].bucketDuration / sampleInterval) +
-            static_cast<size_t>(lodLevels[0].samplesInCurrentBucket);
-    }
-    
-    double timestamp = static_cast<double>(totalSamples) * sampleInterval;
+    double timestamp = static_cast<double>(totalSampleCount) * sampleInterval;
+    totalSampleCount++;
     
     updateLodLevels(momentary, shortTerm, timestamp);
     
@@ -67,26 +61,21 @@ void LoudnessDataStore::updateLodLevels(float momentary, float shortTerm, double
     {
         auto& lod = lodLevels[static_cast<size_t>(i)];
         
-        // Calculate which bucket this timestamp belongs to (time-aligned)
         double bucketIndex = std::floor(timestamp / lod.bucketDuration);
         double bucketStart = bucketIndex * lod.bucketDuration;
         
-        // Check if we need to start a new bucket
         if (bucketStart > lod.currentBucketStart)
         {
-            // Finalize previous bucket if it has data
             if (lod.samplesInCurrentBucket > 0)
             {
                 lod.buckets.push_back(lod.currentBucket);
             }
             
-            // Start new bucket
             lod.currentBucket.reset();
             lod.currentBucketStart = bucketStart;
             lod.samplesInCurrentBucket = 0;
         }
         
-        // Add sample to current bucket
         double bucketMid = bucketStart + lod.bucketDuration * 0.5;
         lod.currentBucket.addSample(momentary, shortTerm, bucketMid);
         lod.samplesInCurrentBucket++;
@@ -103,13 +92,7 @@ int LoudnessDataStore::selectLodLevel(double timeRange, int targetPoints) const
     if (targetPoints <= 0)
         return 0;
     
-    // We want approximately targetPoints points for this time range
-    // So the ideal bucket duration is timeRange / targetPoints
     double idealBucketDuration = timeRange / static_cast<double>(targetPoints);
-    
-    // Find the LOD level with bucket duration >= idealBucketDuration
-    // This ensures we get <= targetPoints (coarse enough)
-    // Start from finest (LOD 0) and go coarser until we find a match
     
     for (int i = 0; i < kNumLods; ++i)
     {
@@ -119,7 +102,6 @@ int LoudnessDataStore::selectLodLevel(double timeRange, int targetPoints) const
         }
     }
     
-    // If even the coarsest LOD is too fine, use the coarsest
     return kNumLods - 1;
 }
 
@@ -129,6 +111,8 @@ LoudnessDataStore::QueryResult LoudnessDataStore::getDataForDisplay(
     std::lock_guard<std::mutex> lock(dataMutex);
     
     QueryResult result;
+    result.dataStartTime = startTime;
+    result.dataEndTime = endTime;
     
     if (endTime <= startTime || targetPoints <= 0)
         return result;
@@ -142,57 +126,50 @@ LoudnessDataStore::QueryResult LoudnessDataStore::getDataForDisplay(
     if (lod.buckets.empty() && lod.samplesInCurrentBucket == 0)
         return result;
     
-    // Binary search for start index
     double searchStart = startTime - lod.bucketDuration;
+    double searchEnd = endTime + lod.bucketDuration;
     
     size_t startIdx = 0;
+    size_t endIdx = lod.buckets.size();
+    
     if (!lod.buckets.empty())
     {
-        auto it = std::lower_bound(lod.buckets.begin(), lod.buckets.end(), searchStart,
+        auto itStart = std::lower_bound(lod.buckets.begin(), lod.buckets.end(), searchStart,
             [](const MinMaxPoint& bucket, double time) {
                 return bucket.timeMid < time;
             });
-        startIdx = static_cast<size_t>(std::distance(lod.buckets.begin(), it));
-    }
-    
-    // Binary search for end index
-    double searchEnd = endTime + lod.bucketDuration;
-    
-    size_t endIdx = lod.buckets.size();
-    if (!lod.buckets.empty())
-    {
-        auto it = std::upper_bound(lod.buckets.begin(), lod.buckets.end(), searchEnd,
+        startIdx = static_cast<size_t>(std::distance(lod.buckets.begin(), itStart));
+        
+        auto itEnd = std::upper_bound(lod.buckets.begin(), lod.buckets.end(), searchEnd,
             [](double time, const MinMaxPoint& bucket) {
                 return time < bucket.timeMid;
             });
-        endIdx = static_cast<size_t>(std::distance(lod.buckets.begin(), it));
+        endIdx = static_cast<size_t>(std::distance(lod.buckets.begin(), itEnd));
     }
     
-    // Calculate expected number of points
     size_t numPoints = (endIdx > startIdx) ? (endIdx - startIdx) : 0;
-    
-    // Reserve and copy
     result.points.reserve(numPoints + 1);
     
     for (size_t i = startIdx; i < endIdx; ++i)
     {
-        const auto& bucket = lod.buckets[i];
-        if (bucket.timeMid >= startTime - lod.bucketDuration && 
-            bucket.timeMid <= endTime + lod.bucketDuration)
-        {
-            result.points.push_back(bucket);
-        }
+        result.points.push_back(lod.buckets[i]);
     }
     
-    // Add current bucket if in range
     if (lod.samplesInCurrentBucket > 0)
     {
         double currentMid = lod.currentBucketStart + lod.bucketDuration * 0.5;
-        if (currentMid >= startTime - lod.bucketDuration && 
-            currentMid <= endTime + lod.bucketDuration)
+        if (currentMid >= searchStart && currentMid <= searchEnd)
         {
-            result.points.push_back(lod.currentBucket);
+            MinMaxPoint currentCopy = lod.currentBucket;
+            currentCopy.timeMid = currentMid;
+            result.points.push_back(currentCopy);
         }
+    }
+    
+    if (!result.points.empty())
+    {
+        result.dataStartTime = result.points.front().timeMid - lod.bucketDuration * 0.5;
+        result.dataEndTime = result.points.back().timeMid + lod.bucketDuration * 0.5;
     }
     
     return result;

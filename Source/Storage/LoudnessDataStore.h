@@ -50,6 +50,8 @@ public:
         std::vector<MinMaxPoint> points;
         int lodLevel{0};
         double bucketDuration{0.1};
+        double dataStartTime{0.0};
+        double dataEndTime{0.0};
     };
 
     LoudnessDataStore();
@@ -62,14 +64,12 @@ public:
     
     double getCurrentTime() const;
     
-    // Query data for display - returns approximately targetPoints number of points
     QueryResult getDataForDisplay(double startTime, double endTime, int targetPoints) const;
 
 private:
     void updateLodLevels(float momentary, float shortTerm, double timestamp);
     
     static constexpr int kNumLods = 6;
-    // LOD bucket durations: 0.1s, 0.4s, 1.6s, 6.4s, 25.6s, 102.4s
     
     struct LodLevel
     {
@@ -85,6 +85,7 @@ private:
     
     double updateRate{10.0};
     double sampleInterval{0.1};
+    size_t totalSampleCount{0};
     std::atomic<double> currentTimestamp{0.0};
     
     int selectLodLevel(double timeRange, int targetPoints) const;
