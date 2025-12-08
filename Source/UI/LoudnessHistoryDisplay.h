@@ -24,7 +24,9 @@ public:
 private:
     void timerCallback() override;
     
-    bool updateCachedDataIfNeeded();
+    void updateDisplayTimes();
+    bool needsCacheUpdate() const;
+    void updateCache();
     void buildPaths();
     
     void drawBackground(juce::Graphics& g);
@@ -44,14 +46,14 @@ private:
     LoudnessDataStore& dataStore;
     
     static constexpr double kDisplayDelay = 0.3;
-    static constexpr int kTargetPointsPerWidth = 400; // Target ~400 points regardless of width
+    static constexpr int kTargetPoints = 500;
     
-    // View state
+    // View parameters
     double viewTimeRange{10.0};
     float viewMinLufs{-60.0f};
     float viewMaxLufs{0.0f};
     
-    // Display times
+    // Current display window (recalculated each frame)
     double displayStartTime{0.0};
     double displayEndTime{0.0};
     
@@ -62,26 +64,24 @@ private:
     static constexpr float kMaxLufsRange = 90.0f;
     static constexpr float kAbsoluteMinLufs = -90.0f;
     
-    // Current values
+    // Current meter values
     float currentMomentary{-100.0f};
     float currentShortTerm{-100.0f};
     
-    // Cache
+    // Cached data and state
     LoudnessDataStore::QueryResult cachedData;
-    double cacheDisplayStart{-999.0};
-    double cacheDisplayEnd{-999.0};
-    double cacheTimeRange{-1.0};
-    int cacheWidth{0};
-    size_t cacheDataSize{0};
+    double lastQueryTime{-1.0};
+    double lastViewTimeRange{-1.0};
+    int lastWidth{0};
     
-    // Paths
+    // Cached paths
     juce::Path momentaryFillPath;
     juce::Path momentaryLinePath;
     juce::Path shortTermFillPath;
     juce::Path shortTermLinePath;
     bool pathsNeedRebuild{true};
     
-    // Mouse
+    // Mouse state
     juce::Point<float> lastMousePos;
     bool isDragging{false};
     

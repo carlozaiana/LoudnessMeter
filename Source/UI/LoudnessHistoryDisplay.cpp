@@ -6,7 +6,7 @@ LoudnessHistoryDisplay::LoudnessHistoryDisplay(LoudnessDataStore& store)
     : dataStore(store)
 {
     setOpaque(true);
-    startTimerHz(30); // 30 Hz is enough for smooth display
+    startTimerHz(30);
 }
 
 LoudnessHistoryDisplay::~LoudnessHistoryDisplay()
@@ -25,6 +25,13 @@ void LoudnessHistoryDisplay::setCurrentLoudness(float momentary, float shortTerm
     currentShortTerm = shortTerm;
 }
 
+void LoudnessHistoryDisplay::updateDisplayTimes()
+{
+    double currentTime = dataStore.getCurrentTime();
+    displayEndTime = currentTime - kDisplayDelay;
+    displayStartTime = displayEndTime - viewTimeRange;
+}
+
 float LoudnessHistoryDisplay::timeToX(double time) const
 {
     double normalized = (time - displayStartTime) / viewTimeRange;
@@ -37,66 +44,58 @@ float LoudnessHistoryDisplay::lufsToY(float lufs) const
     return normalized * static_cast<float>(getHeight());
 }
 
-bool LoudnessHistoryDisplay::updateCachedDataIfNeeded()
+bool LoudnessHistoryDisplay::needsCacheUpdate() const
 {
     double currentTime = dataStore.getCurrentTime();
-    
-    displayEndTime = currentTime - kDisplayDelay;
-    displayStartTime = displayEndTime - viewTimeRange;
-    
     int width = getWidth();
     
-    // Check if cache is still valid
-    // Allow small time drift without re-querying (scrolling)
-    double timeDrift = std::abs(displayEndTime - cacheDisplayEnd);
-    bool significantDrift = timeDrift > (viewTimeRange * 0.1); // 10% drift triggers update
+    // Update if view parameters changed
+    if (std::abs(viewTimeRange - lastViewTimeRange) > 0.001)
+        return true;
     
-    bool viewChanged = (std::abs(viewTimeRange - cacheTimeRange) > 0.001 ||
-                        width != cacheWidth);
+    if (width != lastWidth)
+        return true;
     
-    // Check if new data arrived (more points in data store)
-    bool newData = false;
-    {
-        double queryStart = std::max(0.0, displayStartTime);
-        double queryEnd = std::max(0.0, displayEndTime);
-        
-        if (queryEnd > queryStart && width > 0)
-        {
-            // Quick check: just see if current bucket changed
-            auto tempResult = dataStore.getDataForDisplay(queryStart, queryEnd, kTargetPointsPerWidth);
-            newData = (tempResult.points.size() != cacheDataSize);
-            
-            if (newData || viewChanged || significantDrift)
-            {
-                cachedData = std::move(tempResult);
-                cacheDisplayStart = displayStartTime;
-                cacheDisplayEnd = displayEndTime;
-                cacheTimeRange = viewTimeRange;
-                cacheWidth = width;
-                cacheDataSize = cachedData.points.size();
-                pathsNeedRebuild = true;
-                return true;
-            }
-        }
-    }
+    // Update if significant time has passed (new data)
+    double timeSinceLastQuery = currentTime - lastQueryTime;
+    double updateThreshold = std::max(0.1, viewTimeRange * 0.02);
     
-    // Update display times for rendering even if cache is valid
-    cacheDisplayStart = displayStartTime;
-    cacheDisplayEnd = displayEndTime;
+    if (timeSinceLastQuery > updateThreshold)
+        return true;
     
     return false;
+}
+
+void LoudnessHistoryDisplay::updateCache()
+{
+    double queryStart = std::max(0.0, displayStartTime);
+    double queryEnd = std::max(0.0, displayEndTime);
+    
+    if (queryEnd > queryStart)
+    {
+        cachedData = dataStore.getDataForDisplay(queryStart, queryEnd, kTargetPoints);
+    }
+    else
+    {
+        cachedData = LoudnessDataStore::QueryResult();
+    }
+    
+    lastQueryTime = dataStore.getCurrentTime();
+    lastViewTimeRange = viewTimeRange;
+    lastWidth = getWidth();
+    pathsNeedRebuild = true;
 }
 
 void LoudnessHistoryDisplay::buildSmoothPath(juce::Path& path, 
                                               const std::vector<juce::Point<float>>& points)
 {
-    if (points.size() < 2)
+    if (points.empty())
+        return;
+    
+    if (points.size() == 1)
     {
-        if (points.size() == 1)
-        {
-            path.startNewSubPath(points[0]);
-            path.lineTo(points[0].x + 0.1f, points[0].y);
-        }
+        path.startNewSubPath(points[0]);
+        path.lineTo(points[0].x + 0.5f, points[0].y);
         return;
     }
     
@@ -108,8 +107,7 @@ void LoudnessHistoryDisplay::buildSmoothPath(juce::Path& path,
         return;
     }
     
-    // Catmull-Rom spline converted to cubic Bezier
-    const float tension = 0.5f;
+    const float tension = 0.4f;
     
     for (size_t i = 0; i < points.size() - 1; ++i)
     {
@@ -119,10 +117,15 @@ void LoudnessHistoryDisplay::buildSmoothPath(juce::Path& path,
         const auto& p0 = (i > 0) ? points[i - 1] : p1;
         const auto& p3 = (i + 2 < points.size()) ? points[i + 2] : p2;
         
-        float cp1x = p1.x + (p2.x - p0.x) * tension / 3.0f;
-        float cp1y = p1.y + (p2.y - p0.y) * tension / 3.0f;
-        float cp2x = p2.x - (p3.x - p1.x) * tension / 3.0f;
-        float cp2y = p2.y - (p3.y - p1.y) * tension / 3.0f;
+        float dx1 = (p2.x - p0.x) * tension;
+        float dy1 = (p2.y - p0.y) * tension;
+        float dx2 = (p3.x - p1.x) * tension;
+        float dy2 = (p3.y - p1.y) * tension;
+        
+        float cp1x = p1.x + dx1 / 3.0f;
+        float cp1y = p1.y + dy1 / 3.0f;
+        float cp2x = p2.x - dx2 / 3.0f;
+        float cp2y = p2.y - dy2 / 3.0f;
         
         path.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
     }
@@ -135,18 +138,20 @@ void LoudnessHistoryDisplay::buildFillPath(juce::Path& path,
     if (topPoints.size() < 2 || bottomPoints.size() < 2)
         return;
     
-    // Build top edge
+    if (topPoints.size() != bottomPoints.size())
+        return;
+    
+    // Start with top curve
     buildSmoothPath(path, topPoints);
     
-    // Build bottom edge in reverse (continuing the path)
+    // Line to last bottom point
+    path.lineTo(bottomPoints.back());
+    
+    // Build bottom curve in reverse
     std::vector<juce::Point<float>> reversedBottom(bottomPoints.rbegin(), bottomPoints.rend());
     
-    const float tension = 0.5f;
+    const float tension = 0.4f;
     
-    // Connect to first point of reversed bottom
-    path.lineTo(reversedBottom[0]);
-    
-    // Continue with smooth curve for bottom
     for (size_t i = 0; i < reversedBottom.size() - 1; ++i)
     {
         const auto& p1 = reversedBottom[i];
@@ -155,10 +160,15 @@ void LoudnessHistoryDisplay::buildFillPath(juce::Path& path,
         const auto& p0 = (i > 0) ? reversedBottom[i - 1] : p1;
         const auto& p3 = (i + 2 < reversedBottom.size()) ? reversedBottom[i + 2] : p2;
         
-        float cp1x = p1.x + (p2.x - p0.x) * tension / 3.0f;
-        float cp1y = p1.y + (p2.y - p0.y) * tension / 3.0f;
-        float cp2x = p2.x - (p3.x - p1.x) * tension / 3.0f;
-        float cp2y = p2.y - (p3.y - p1.y) * tension / 3.0f;
+        float dx1 = (p2.x - p0.x) * tension;
+        float dy1 = (p2.y - p0.y) * tension;
+        float dx2 = (p3.x - p1.x) * tension;
+        float dy2 = (p3.y - p1.y) * tension;
+        
+        float cp1x = p1.x + dx1 / 3.0f;
+        float cp1y = p1.y + dy1 / 3.0f;
+        float cp2x = p2.x - dx2 / 3.0f;
+        float cp2y = p2.y - dy2 / 3.0f;
         
         path.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
     }
@@ -187,6 +197,13 @@ void LoudnessHistoryDisplay::buildPaths()
     std::vector<juce::Point<float>> sBotPts;
     std::vector<juce::Point<float>> sMidPts;
     
+    mTopPts.reserve(cachedData.points.size());
+    mBotPts.reserve(cachedData.points.size());
+    mMidPts.reserve(cachedData.points.size());
+    sTopPts.reserve(cachedData.points.size());
+    sBotPts.reserve(cachedData.points.size());
+    sMidPts.reserve(cachedData.points.size());
+    
     float height = static_cast<float>(getHeight());
     float width = static_cast<float>(getWidth());
     
@@ -194,36 +211,33 @@ void LoudnessHistoryDisplay::buildPaths()
     {
         float x = timeToX(pt.timeMid);
         
-        // Skip points well outside visible area
-        if (x < -100.0f || x > width + 100.0f)
+        if (x < -50.0f || x > width + 50.0f)
             continue;
         
-        // Momentary
         if (pt.hasValidMomentary())
         {
             float yTop = lufsToY(pt.momentaryMax);
             float yBot = lufsToY(pt.momentaryMin);
             float yMid = (yTop + yBot) * 0.5f;
             
-            yTop = juce::jlimit(-10.0f, height + 10.0f, yTop);
-            yBot = juce::jlimit(-10.0f, height + 10.0f, yBot);
-            yMid = juce::jlimit(-10.0f, height + 10.0f, yMid);
+            yTop = juce::jlimit(-50.0f, height + 50.0f, yTop);
+            yBot = juce::jlimit(-50.0f, height + 50.0f, yBot);
+            yMid = juce::jlimit(-50.0f, height + 50.0f, yMid);
             
             mTopPts.push_back({x, yTop});
             mBotPts.push_back({x, yBot});
             mMidPts.push_back({x, yMid});
         }
         
-        // Short-term
         if (pt.hasValidShortTerm())
         {
             float yTop = lufsToY(pt.shortTermMax);
             float yBot = lufsToY(pt.shortTermMin);
             float yMid = (yTop + yBot) * 0.5f;
             
-            yTop = juce::jlimit(-10.0f, height + 10.0f, yTop);
-            yBot = juce::jlimit(-10.0f, height + 10.0f, yBot);
-            yMid = juce::jlimit(-10.0f, height + 10.0f, yMid);
+            yTop = juce::jlimit(-50.0f, height + 50.0f, yTop);
+            yBot = juce::jlimit(-50.0f, height + 50.0f, yBot);
+            yMid = juce::jlimit(-50.0f, height + 50.0f, yMid);
             
             sTopPts.push_back({x, yTop});
             sBotPts.push_back({x, yBot});
@@ -231,7 +245,6 @@ void LoudnessHistoryDisplay::buildPaths()
         }
     }
     
-    // Build paths
     if (mTopPts.size() >= 2)
     {
         buildFillPath(momentaryFillPath, mTopPts, mBotPts);
@@ -249,7 +262,12 @@ void LoudnessHistoryDisplay::buildPaths()
 
 void LoudnessHistoryDisplay::paint(juce::Graphics& g)
 {
-    updateCachedDataIfNeeded();
+    updateDisplayTimes();
+    
+    if (needsCacheUpdate())
+    {
+        updateCache();
+    }
     
     if (pathsNeedRebuild)
     {
@@ -270,7 +288,6 @@ void LoudnessHistoryDisplay::drawBackground(juce::Graphics& g)
 
 void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
 {
-    // Draw momentary (behind)
     if (!momentaryFillPath.isEmpty())
     {
         g.setColour(momentaryColour.withAlpha(0.35f));
@@ -283,7 +300,6 @@ void LoudnessHistoryDisplay::drawCurves(juce::Graphics& g)
             juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
     
-    // Draw short-term (on top)
     if (!shortTermFillPath.isEmpty())
     {
         g.setColour(shortTermColour.withAlpha(0.45f));
@@ -304,7 +320,6 @@ void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
     
     float lufsRange = viewMaxLufs - viewMinLufs;
     
-    // Horizontal grid (LUFS)
     float gridStep = 6.0f;
     if (lufsRange > 40.0f) gridStep = 12.0f;
     if (lufsRange < 20.0f) gridStep = 3.0f;
@@ -324,7 +339,6 @@ void LoudnessHistoryDisplay::drawGrid(juce::Graphics& g)
                    5, static_cast<int>(y) - 12, 60, 12, juce::Justification::left);
     }
     
-    // Vertical grid (time)
     double timeStep = 1.0;
     if (viewTimeRange > 30.0) timeStep = 5.0;
     if (viewTimeRange > 60.0) timeStep = 10.0;
@@ -380,7 +394,6 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
 {
     int boxW = 120, boxH = 40, margin = 10;
     
-    // Momentary
     juce::Rectangle<int> mBox(margin, margin, boxW, boxH);
     g.setColour(momentaryColour.withAlpha(0.85f));
     g.fillRoundedRectangle(mBox.toFloat(), 5.0f);
@@ -393,7 +406,6 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
         : "-inf LUFS";
     g.drawText(mStr, mBox.reduced(5, 0), juce::Justification::left);
     
-    // Short-term
     juce::Rectangle<int> sBox(margin + boxW + margin, margin, boxW, boxH);
     g.setColour(shortTermColour.withAlpha(0.85f));
     g.fillRoundedRectangle(sBox.toFloat(), 5.0f);
@@ -406,7 +418,6 @@ void LoudnessHistoryDisplay::drawCurrentValues(juce::Graphics& g)
         : "-inf LUFS";
     g.drawText(sStr, sBox.reduced(5, 0), juce::Justification::left);
     
-    // Legend
     int legendY = getHeight() - 25;
     g.setFont(11.0f);
     
@@ -458,7 +469,7 @@ void LoudnessHistoryDisplay::drawZoomInfo(juce::Graphics& g)
 void LoudnessHistoryDisplay::resized()
 {
     pathsNeedRebuild = true;
-    cacheWidth = 0; // Force cache invalidation
+    lastWidth = 0;
 }
 
 void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
@@ -468,7 +479,6 @@ void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
     
     if (event.mods.isShiftDown())
     {
-        // Y zoom
         float range = viewMaxLufs - viewMinLufs;
         float mouseRatio = event.position.y / static_cast<float>(getHeight());
         float mouseLufs = viewMaxLufs - mouseRatio * range;
@@ -489,16 +499,17 @@ void LoudnessHistoryDisplay::mouseWheelMove(const juce::MouseEvent& event,
             viewMinLufs = kAbsoluteMinLufs;
             viewMaxLufs = kAbsoluteMinLufs + newRange;
         }
+        
+        pathsNeedRebuild = true;
     }
     else
     {
-        // X zoom
         double newRange = (wheel.deltaY > 0) ? viewTimeRange / zoomFactor : viewTimeRange * zoomFactor;
         viewTimeRange = juce::jlimit(kMinTimeRange, kMaxTimeRange, newRange);
+        
+        lastViewTimeRange = -1.0;
     }
     
-    pathsNeedRebuild = true;
-    cacheTimeRange = -1.0; // Force cache invalidation
     repaint();
 }
 
