@@ -9,13 +9,6 @@
 class LoudnessDataStore
 {
 public:
-    struct LoudnessPoint
-    {
-        float momentary{-100.0f};
-        float shortTerm{-100.0f};
-        double timestamp{0.0};
-    };
-    
     struct MinMaxPoint
     {
         float momentaryMin{100.0f};
@@ -50,36 +43,6 @@ public:
             }
             timeMid = t;
         }
-        
-        void merge(const MinMaxPoint& other)
-        {
-            if (other.hasValidMomentary())
-            {
-                if (hasValidMomentary())
-                {
-                    momentaryMin = std::min(momentaryMin, other.momentaryMin);
-                    momentaryMax = std::max(momentaryMax, other.momentaryMax);
-                }
-                else
-                {
-                    momentaryMin = other.momentaryMin;
-                    momentaryMax = other.momentaryMax;
-                }
-            }
-            if (other.hasValidShortTerm())
-            {
-                if (hasValidShortTerm())
-                {
-                    shortTermMin = std::min(shortTermMin, other.shortTermMin);
-                    shortTermMax = std::max(shortTermMax, other.shortTermMax);
-                }
-                else
-                {
-                    shortTermMin = other.shortTermMin;
-                    shortTermMax = other.shortTermMax;
-                }
-            }
-        }
     };
     
     struct QueryResult
@@ -87,8 +50,6 @@ public:
         std::vector<MinMaxPoint> points;
         int lodLevel{0};
         double bucketDuration{0.1};
-        double queryStartTime{0.0};
-        double queryEndTime{0.0};
     };
 
     LoudnessDataStore();
@@ -100,33 +61,31 @@ public:
     void addPoint(float momentary, float shortTerm);
     
     double getCurrentTime() const;
-    double getUpdateRate() const { return updateRate; }
     
-    QueryResult getDataForTimeRange(double startTime, double endTime, int maxPoints) const;
+    // Query data for display - returns approximately targetPoints number of points
+    QueryResult getDataForDisplay(double startTime, double endTime, int targetPoints) const;
 
 private:
     void updateLodLevels(float momentary, float shortTerm, double timestamp);
-    int selectLodLevel(double timeRange, int maxPoints) const;
-    
-    static constexpr size_t kMaxRawPoints = 180000;
-    
-    mutable std::mutex dataMutex;
-    std::vector<LoudnessPoint> rawData;
     
     static constexpr int kNumLods = 6;
+    // LOD bucket durations: 0.1s, 0.4s, 1.6s, 6.4s, 25.6s, 102.4s
     
     struct LodLevel
     {
         std::vector<MinMaxPoint> buckets;
         double bucketDuration{0.1};
-        double currentBucketStart{0.0};
+        double currentBucketStart{-1.0};
         MinMaxPoint currentBucket;
         int samplesInCurrentBucket{0};
     };
     
+    mutable std::mutex dataMutex;
     std::array<LodLevel, kNumLods> lodLevels;
     
     double updateRate{10.0};
     double sampleInterval{0.1};
     std::atomic<double> currentTimestamp{0.0};
+    
+    int selectLodLevel(double timeRange, int targetPoints) const;
 };
