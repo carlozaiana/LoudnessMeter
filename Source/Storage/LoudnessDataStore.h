@@ -27,10 +27,9 @@ public:
     double getUpdateRate() const { return updateRate; }
     
     std::vector<LoudnessPoint> getPointsInRange(double startTime, double endTime) const;
-    LoudnessPoint getPointAtTime(double time) const;
 
 private:
-    static constexpr size_t kMaxPoints = 180000; // 5 hours at 10 Hz
+    static constexpr size_t kMaxPoints = 180000;
     
     mutable std::mutex dataMutex;
     std::vector<LoudnessPoint> dataBuffer;
